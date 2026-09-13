@@ -1,0 +1,11 @@
+out/
+images/processed/*
+!images/processed/.gitkeep
+# Imagen gigante de prueba - no subir a GitHub
+images/originals/eso1242a.psb
+
+# Archivos compilados
+out/
+
+# Tiles generados / cache
+images/processed/
