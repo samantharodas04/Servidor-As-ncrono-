@@ -1,657 +1,81 @@
-# 🖼️ Proyecto Servidor Asíncrono para Imágenes Gigantes
+# Servidor asíncrono de imágenes por chunks
 
-> **Ciencias de la Computación VIII**  
-> **Java 21**
+Proyecto Java 21 en reconstrucción incremental. El objetivo actual es mostrar
+una imagen seleccionada mediante chunks JPEG generados bajo demanda, sin crear
+una galería activa ni una pirámide completa de resoluciones en disco.
 
-Servidor HTTP/WebSocket asíncrono desarrollado en Java para visualizar imágenes de muy alta resolución **sin enviar la imagen completa al navegador**.
+## Estado actual
 
-La solución utiliza una **pirámide multirresolución**, división de imágenes en **tiles** y un protocolo propio denominado **IRP/1.0 (Image Resolution Protocol)**.
+El flujo nuevo ya incluye:
 
----
+- descubrimiento de originales y lectura de dimensiones;
+- niveles matemáticos de zoom;
+- regiones visibles según centro y viewport;
+- chunks fijos de hasta `512 × 512`;
+- preparación regional con libvips;
+- pool limitado de workers;
+- generaciones y cancelación de solicitudes obsoletas;
+- caché LRU en memoria limitada por bytes;
+- generación exclusiva de los chunks que no estén en caché;
+- mensaje binario `PAI/1 VIEW` documentado por su codec;
+- servidor HTTP/WebSocket asíncrono en `/pai`;
+- recepción de frames binarios y conversión a `ViewRequest`;
+- un `ViewCoordinator` independiente por cliente WebSocket;
+- procesamiento compartido con pool de workers y caché global;
+- respuestas binarias `VIEW_START → CHUNK... → VIEW_END`;
+- cola de escritura limitada e independiente por cliente;
+- catálogo binario `LIST_IMAGES → IMAGE_LIST` con ID, nombre, dimensiones y bytes;
+- rechazo de mensajes PAI inválidos sin detener el servidor.
 
-## 📌 Descripción
+`Main` inicia el servidor y el frontend permite enviar un `VIEW` válido o uno
+inválido. El servidor procesa cada vista, envía sus chunks JPEG y el navegador
+valida la generación, la cantidad de chunks y el total de bytes recibidos.
 
-El objetivo del proyecto es permitir la visualización eficiente de imágenes extremadamente grandes, evitando cargar o transferir el archivo completo.
-
-En lugar de enviar toda la imagen, el servidor divide el contenido en pequeños bloques llamados **tiles** y mantiene diferentes niveles de resolución.
-
-De esta manera, el navegador solicita únicamente:
-
-- La resolución que necesita.
-- La región que el usuario está visualizando.
-- Los tiles visibles en ese momento.
-
-```text
-Imagen gigante
-      │
-      ▼
-Pirámide multirresolución
-      │
-      ├── Nivel 0 ──► baja resolución
-      ├── Nivel 1
-      ├── Nivel 2
-      │      ...
-      └── Nivel N ──► resolución original
-             │
-             ▼
-          Tiles
-             │
-             ▼
-      Servidor Java
-             │
-             ▼
-     Solo tiles visibles
-             │
-             ▼
-         Navegador
-```
-
----
-
-## 🚀 Características principales
-
-- Servidor desarrollado en **Java 21**.
-- Servidor HTTP asíncrono.
-- Comunicación mediante **WebSocket**.
-- Protocolo propio **IRP/1.0**.
-- Soporte para múltiples clientes.
-- Pirámide multirresolución.
-- Tiles JPEG de **512 × 512 píxeles**.
-- Transferencia únicamente de las regiones visibles.
-- Eliminación y solicitud real de información al cambiar de resolución.
-- Cache de imágenes procesadas.
-- Reanudación del procesamiento por niveles.
-- Funcionamiento completamente local después de preparar las imágenes.
-- Frontend servido directamente por el servidor Java.
-
----
-
-# 🗂️ Formatos soportados
-
-La versión actual reconoce:
-
-| Formato | Soporte |
-|---|---|
-| JPG / JPEG | ✅ |
-| PNG | ✅ |
-| TIFF / TIF | ✅ |
-| PSB | ✅ |
-
-Para imágenes pequeñas puede utilizarse **Java ImageIO**.
-
-Para archivos gigantes, especialmente **PSB/TIFF**, Java **no construye un `BufferedImage` con la imagen completa**.
-
-En su lugar, se utiliza ImageMagick instalado localmente para preparar una pirámide de tiles JPEG almacenada en disco.
-
-Después del procesamiento, el servidor Java trabaja únicamente con los tiles necesarios.
-
----
-
-# 🌌 Imagen gigante de prueba
-
-El proyecto está preparado para trabajar con:
+La secuencia de respuesta utiliza números big-endian:
 
 ```text
-eso1242a.psb
+VIEW_START = PAI/1, generación, viewport, zoom, región y cantidad
+CHUNK      = PAI/1, generación, índice, geometría, longitud y JPEG
+VIEW_END   = PAI/1, generación, cantidad y bytes JPEG totales
 ```
 
-Características aproximadas:
-
-```text
-Formato:     PSB
-Dimensiones: 108199 × 81503 píxeles
-Tamaño:      24.6 GB
-```
-
-Debido al tamaño del archivo, **no debe cargarse completamente en memoria RAM**.
-
-El flujo utilizado es:
-
-```text
-eso1242a.psb
-      │
-      ▼
-ImageMagick
-      │
-      ▼
-Generación de niveles
-      │
-      ▼
-Tiles 512 × 512
-      │
-      ▼
-images/processed/
-      │
-      ▼
-Servidor Java
-      │
-      ▼
-IRP/1.0
-      │
-      ▼
-Navegador
-```
-
-La preparación se realiza una sola vez. Los resultados quedan almacenados en cache para las siguientes ejecuciones.
-
----
-
-# 📁 Estructura del proyecto
-
-```text
-ProyectoServidorAsincrono/
-│
-├── Makefile
-├── README.md
-│
-├── src/
-│   ├── Main.java
-│   │
-│   ├── image/
-│   │   ├── GiantImageProcessor.java
-│   │   ├── ImageManager.java
-│   │   ├── ImageMetadata.java
-│   │   └── PrepareImages.java
-│   │
-│   ├── protocol/
-│   │   └── IrpProtocol.java
-│   │
-│   └── server/
-│       ├── AsyncHttpServer.java
-│       └── WebSocketUtil.java
-│
-├── web/
-│   ├── index.html
-│   ├── app.js
-│   └── style.css
-│
-├── images/
-│   ├── originals/
-│   └── processed/
-│
-└── docs/
-    ├── PROTOCOLO_IRP.md
-    └── Documentacion_Proyecto_Servidor_Asincrono.pdf
-```
-
----
-
-# ⚙️ Requisitos
-
-Antes de ejecutar el proyecto se necesita:
-
-- **Java 20 o Java 21**
-- `make`
-- **ImageMagick**
-- Soporte de ImageMagick para PSB
-- Espacio suficiente en disco para:
-  - archivo original;
-  - tiles;
-  - archivos temporales.
-
-> [!NOTE]
-> El servidor y el frontend no necesitan conexión a Internet durante su ejecución.  
-> ImageMagick se ejecuta localmente.
-
----
-
-# 🔍 1. Verificar dependencias
-
-En WSL/Linux:
+## Compilar y ejecutar
 
 ```bash
-java -version
+make compile
+make run
 ```
 
-Para **ImageMagick 7**:
-
-```bash
-magick -version
-magick identify -list format | grep PSB
-```
-
-Para **ImageMagick 6**:
-
-```bash
-convert -version
-identify -version
-identify -list format | grep PSB
-```
-
-También puede utilizarse:
+Verificar herramientas:
 
 ```bash
 make check-tools
 ```
 
-ImageMagick debe mostrar `PSB` como formato disponible para lectura.
-
----
-
-# 🖼️ 2. Agregar la imagen
-
-Colocar el archivo original dentro de:
+## Directorios
 
 ```text
-images/originals/
+src/cache/    caché LRU
+src/image/    lectura y procesamiento regional
+src/view/     zoom, regiones, chunks, generaciones y coordinación
+src/worker/   pool limitado de workers
+src/protocol/ codec binario PAI/1 VIEW
+src/server/   servidor HTTP/WebSocket y lectura de frames
+web/          cliente mínimo para probar VIEW
 ```
 
-Por ejemplo:
+Los originales se colocan en `images/originals`. `images/processed` no se usa
+para construir una pirámide persistente.
+
+La bitácora detallada del rediseño está en:
 
 ```text
-images/originals/eso1242a.psb
+../BITACORA_COMPLETA_SERVIDOR_ASINCRONO_CHUNKS.md
 ```
 
-> [!IMPORTANT]
-> No se debe cambiar la extensión del archivo de `.psb` a `.jpg`.  
-> El proyecto reconoce PSB directamente.
+La explicación paso a paso de la arquitectura, WebSocket, TCP y los formatos
+binarios PAI se encuentra en [docs/README.md](docs/README.md).
 
----
+## Próximo hito
 
-# 🧩 3. Preparar la imagen gigante
-
-Para una imagen de aproximadamente 24 GB es recomendable realizar el procesamiento **antes de iniciar la demostración**.
-
-Ejecutar:
-
-```bash
-make prepare
-```
-
-Durante el procesamiento se mostrará información similar a:
-
-```text
-[GIANT] Archivo: eso1242a.psb
-[GIANT] Tamaño en disco: 24.60 GB
-[GIANT] Dimensiones: 108199x81503
-[GIANT] Tiles: 512x512, niveles=9
-
-[GIANT] Procesando nivel 1/9 ...
-[GIANT] Procesando nivel 2/9 ...
-...
-[GIANT] Procesando nivel 9/9 ...
-
-Preparación terminada.
-```
-
-> [!WARNING]
-> La primera preparación puede tardar bastante y utilizar una cantidad considerable de espacio en disco debido al tamaño del archivo original.  
-> No cierre la terminal durante el procesamiento.
-
-Al finalizar se genera una estructura similar a:
-
-```text
-images/processed/eso1242a/
-│
-├── metadata.json
-├── level0/
-├── level1/
-├── level2/
-├── ...
-└── level8/
-```
-
-Cada nivel contiene tiles:
-
-```text
-0_0.jpg
-1_0.jpg
-2_0.jpg
-0_1.jpg
-1_1.jpg
-...
-```
-
----
-
-# ▶️ 4. Ejecutar el servidor
-
-Una vez preparada la imagen:
-
-```bash
-make run
-```
-
-Después abrir en el navegador:
-
-```text
-http://localhost:8080
-```
-
-El inicio de las siguientes ejecuciones será mucho más rápido porque el servidor detectará los tiles almacenados en cache.
-
-Mientras el archivo fuente no haya cambiado, **no será necesario reprocesar el PSB**.
-
-Para detener el servidor:
-
-```text
-Ctrl + C
-```
-
----
-
-# 🌐 5. Funcionamiento de la comunicación
-
-El navegador utiliza inicialmente **HTTP** para obtener:
-
-```text
-index.html
-style.css
-app.js
-```
-
-Después establece una conexión:
-
-```text
-WebSocket → /irp
-```
-
-Sobre esta conexión se utiliza el protocolo propio:
-
-```text
-IRP/1.0
-```
-
-La arquitectura general es:
-
-```text
-┌─────────────┐
-│  Navegador  │
-└──────┬──────┘
-       │
-       │ HTTP
-       ▼
-┌───────────────────┐
-│   Servidor Java   │
-│                   │
-│ HTML / CSS / JS   │
-└─────────┬─────────┘
-          │
-          │ WebSocket /irp
-          ▼
-     ┌───────────┐
-     │  IRP/1.0  │
-     └─────┬─────┘
-           │
-     ┌─────┼─────┐
-     │     │     │
-    LIST  INFO  TILE
-```
-
----
-
-# 📡 6. Protocolo IRP/1.0
-
-**IRP** significa:
-
-> **Image Resolution Protocol**
-
-Es el protocolo de aplicación diseñado para controlar la navegación y transferencia de las imágenes.
-
-Entre sus operaciones se encuentran:
-
-| Comando | Función |
-|---|---|
-| `HELLO` | Inicia la comunicación |
-| `LIST` | Obtiene las imágenes disponibles |
-| `INFO` | Obtiene información de una imagen |
-| `TILE` | Solicita un tile específico |
-| `CLOSE` | Finaliza la comunicación |
-
-Ejemplo:
-
-```text
-IRP/1.0 TILE
-Image: eso1242a
-Level: 8
-X: 25
-Y: 14
-```
-
-El servidor responde primero con información de control IRP y posteriormente con un **frame binario JPEG** que contiene únicamente el tile solicitado.
-
-La especificación completa se encuentra en:
-
-```text
-docs/PROTOCOLO_IRP.md
-```
-
----
-
-# 🧪 7. Pruebas en el navegador
-
-Después de iniciar el servidor:
-
-1. Seleccionar `eso1242a`.
-2. Arrastrar la imagen para navegar.
-3. Utilizar `+ resolución`.
-4. Utilizar `- resolución`.
-5. Observar `Tiles cargados`.
-6. Observar `Datos recibidos`.
-7. Verificar el campo `Procesador`.
-8. Abrir varias pestañas o navegadores para probar múltiples clientes.
-
-Para inspeccionar la comunicación:
-
-```text
-F12
-└── Network
-    └── WS
-        └── irp
-            └── Messages
-```
-
-Se podrán observar solicitudes como:
-
-```text
-IRP/1.0 TILE
-Image: eso1242a
-Level: 8
-X: 25
-Y: 14
-```
-
----
-
-# 🧠 8. Gestión de memoria
-
-Uno de los objetivos principales es evitar que una imagen gigantesca tenga que mantenerse completamente en RAM.
-
-Para imágenes gigantes el flujo es:
-
-```text
-PSB ~24 GB
-    │
-    ▼
-Procesamiento local
-    │
-    ▼
-Pirámide almacenada en disco
-    │
-    ├── level0/
-    ├── level1/
-    ├── level2/
-    ├── ...
-    └── level8/
-           │
-           ▼
-      Servidor Java
-           │
-           ▼
-    Tiles solicitados
-           │
-           ▼
-       Navegador
-```
-
-Por lo tanto:
-
-**Servidor**
-
-```text
-NO mantiene el PSB completo en RAM
-```
-
-**Navegador**
-
-```text
-NO recibe el PSB completo
-```
-
-**Red**
-
-```text
-SOLO transporta los tiles necesarios
-```
-
----
-
-# 🔎 9. Cambio real de resolución
-
-El cambio de resolución **no consiste únicamente en aplicar zoom mediante CSS o JavaScript**.
-
-Cuando el usuario cambia de resolución:
-
-```text
-Resolución actual
-      │
-      ▼
-Se eliminan tiles anteriores
-      │
-      ▼
-Cliente solicita otro nivel
-      │
-      ▼
-Servidor transmite nuevos tiles
-      │
-      ▼
-Nueva información en pantalla
-```
-
-Por lo tanto, existe una **transferencia real de información entre cliente y servidor**.
-
----
-
-# 💾 10. Cache y reanudación
-
-Los resultados procesados se almacenan en:
-
-```text
-images/processed/
-```
-
-Cada nivel completado contiene un archivo:
-
-```text
-.complete
-```
-
-Si el procesamiento se interrumpe, los niveles terminados pueden conservarse y reutilizarse al ejecutar nuevamente:
-
-```bash
-make prepare
-```
-
-El archivo:
-
-```text
-metadata.json
-```
-
-registra información como:
-
-- Dimensiones.
-- Tamaño del archivo fuente.
-- Fecha de modificación.
-- Tamaño de los tiles.
-- Cantidad de niveles.
-- Procesador utilizado.
-
-Si el archivo original cambia, el sistema puede detectar que debe volver a procesarlo.
-
-> [!CAUTION]
-> **No ejecutar `make clean-tiles` después de preparar una imagen de 24 GB**, salvo que realmente se desee eliminar el cache y generar nuevamente todos los niveles.
-
----
-
-# 📶 11. Prueba sin Internet
-
-Una vez instaladas las dependencias y preparada la imagen:
-
-1. Desconectar Wi-Fi/Internet.
-2. Ejecutar:
-
-```bash
-make run
-```
-
-3. Abrir:
-
-```text
-http://localhost:8080
-```
-
-4. Navegar por la imagen.
-5. Cambiar niveles de resolución.
-
-Todo el frontend, protocolo y contenido de las imágenes se atiende **localmente**.
-
----
-
-# 🛠️ 12. Compilación manual
-
-Si no se desea utilizar el `Makefile`:
-
-```bash
-mkdir -p out
-javac -encoding UTF-8 -d out $(find src -name "*.java")
-java -cp out Main -port 8080
-```
-
-Para preparar las imágenes manualmente:
-
-```bash
-java -cp out image.PrepareImages 512
-```
-
----
-
-# 📚 Documentación
-
-La documentación adicional se encuentra dentro de:
-
-```text
-docs/
-```
-
-### Especificación del protocolo
-
-```text
-docs/PROTOCOLO_IRP.md
-```
-
-### Documentación del proyecto
-
-```text
-docs/Documentacion_Proyecto_Servidor_Asincrono.pdf
-```
-
----
-
-# 📖 Referencias técnicas
-
-- RFC 9110 — HTTP Semantics
-- RFC 9112 — HTTP/1.1
-- RFC 6455 — The WebSocket Protocol
-- Oracle Java 21 — `AsynchronousServerSocketChannel`
-- ImageMagick — Image Formats / PSB (Adobe Large Document Format)
-- ESO — `eso1242a`, VISTA Gigapixel Mosaic
-
----
-
-## 🎓 Proyecto académico
-
-**Curso:** Ciencias de la Computación VIII  
-**Tecnología principal:** Java 21  
-**Protocolo:** IRP/1.0  
-**Arquitectura:** HTTP + WebSocket + tiles multirresolución
+Construir el canvas y dibujar cada JPEG en las coordenadas incluidas en `CHUNK`.

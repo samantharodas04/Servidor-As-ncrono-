@@ -1,17 +1,16 @@
-COLOQUE AQUI LAS IMAGENES FUENTE.
+COLOQUE AQUI LAS IMAGENES ORIGINALES.
 
-Formatos reconocidos: JPG, JPEG, PNG, TIF, TIFF y PSB.
+Formatos reconocidos actualmente: JPG, JPEG, PNG, TIF, TIFF y PSB.
 
-Para la imagen gigante del proyecto:
-  eso1242a.psb
+El flujo nuevo no ejecuta una preparacion exhaustiva ni crea una piramide en
+images/processed. Main descubre los originales, calcula la vista solicitada y
+genera bajo demanda solamente los chunks necesarios.
 
-Copiela dentro de esta carpeta y ejecute desde la raiz del proyecto:
+Desde la raiz del proyecto:
+
   make check-tools
-  make prepare
   make run
 
-IMPORTANTE:
-- PSB/TIFF gigante se procesa con ImageMagick instalado localmente.
-- La primera preparacion puede tardar y utilizar bastante espacio en disco.
-- Despues se reutiliza images/processed y el servidor arranca rapidamente.
-- No ejecute make clean-tiles si no desea volver a procesar el PSB.
+La imagen usada por la demostracion actual se selecciona temporalmente mediante
+la constante IMAGE_ID de src/Main.java. La seleccion llegara desde el cliente
+cuando se conecte el siguiente hito WebSocket.

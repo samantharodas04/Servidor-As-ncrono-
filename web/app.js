@@ -1,306 +1,439 @@
-const canvas = document.getElementById("viewer");
-const ctx = canvas.getContext("2d");
+"use strict";
+
+// Paso 1
+const PaiProtocol = Object.freeze({
+    NAME: "PAI",
+    VERSION: 1
+});
+
+const PaiOpcode = Object.freeze({
+    VIEW: 1,
+    LIST_IMAGES: 2,
+    IMAGE_LIST: 3,
+    VIEW_START: 4,
+    CHUNK: 5,
+    VIEW_END: 6
+});
+
+const PaiLimits = Object.freeze({
+    MAX_IMAGES: 1024,
+    MAX_CHUNKS_PER_VIEW: 4096,
+    MAX_JPEG_BYTES: 8 * 1024 * 1024
+});
+
+const PAI_MAGIC = new TextEncoder().encode(PaiProtocol.NAME);
+const PAI_HEADER_BYTES = PAI_MAGIC.length + 2;
+const VIEW_BODY_BYTES = 8 + (5 * 4) + 2;
+const VIEW_START_BYTES = PAI_HEADER_BYTES + 8 + (8 * 4);
+const CHUNK_METADATA_BYTES = PAI_HEADER_BYTES + 8 + (8 * 4);
+const VIEW_END_BYTES = PAI_HEADER_BYTES + 8 + 4 + 8;
+
+// Paso 2
+const statusElement = document.getElementById("connectionStatus");
+const viewStatusElement = document.getElementById("viewStatus");
+const sendValidButton = document.getElementById("sendValidView");
+const sendInvalidButton = document.getElementById("sendInvalidView");
 const imageSelect = document.getElementById("imageSelect");
-const statusEl = document.getElementById("status");
-const levelLabel = document.getElementById("levelLabel");
-const tileCountEl = document.getElementById("tileCount");
-const bytesCountEl = document.getElementById("bytesCount");
-const resolutionEl = document.getElementById("resolution");
-const processorEl = document.getElementById("processor");
-const sourceSizeEl = document.getElementById("sourceSize");
+const imageInfoElement = document.getElementById("imageInfo");
+const catalogStatusElement = document.getElementById("catalogStatus");
 
-let ws;
-let images = [];
-let current = null;
-let currentLevel = 0;
-let offsetX = 0;
-let offsetY = 0;
-let dragging = false;
-let dragStartX = 0;
-let dragStartY = 0;
-let startOffsetX = 0;
-let startOffsetY = 0;
+const scheme = window.location.protocol === "https:" ? "wss" : "ws";
+const socket = new WebSocket(`${scheme}://${window.location.host}/pai`);
+socket.binaryType = "arraybuffer";
 
-let tileCache = new Map();
-let pending = new Set();
-let bytesReceived = 0;
-let expectedBinary = null;
+const catalog = new Map();
+let generationId = 1n;
+let latestRequestedGenerationId = 0n;
+let activeView = null;
 
-function sendIrp(command, fields = {}) {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    let msg = `IRP/1.0 ${command}\n`;
-    for (const [k, v] of Object.entries(fields)) {
-        msg += `${k}: ${v}\n`;
+// Paso 3
+function createPaiMessage(opcode, payloadBytes = 0) {
+    const buffer = new ArrayBuffer(PAI_HEADER_BYTES + payloadBytes);
+    const bytes = new Uint8Array(buffer);
+    const view = new DataView(buffer);
+
+    bytes.set(PAI_MAGIC, 0);
+    view.setUint8(PAI_MAGIC.length, PaiProtocol.VERSION);
+    view.setUint8(PAI_MAGIC.length + 1, opcode);
+
+    return {buffer, view, offset: PAI_HEADER_BYTES};
+}
+
+function readPaiOpcode(buffer, minimumPayloadBytes = 0) {
+    const view = new DataView(buffer);
+    if (view.byteLength < PAI_HEADER_BYTES + minimumPayloadBytes) {
+        throw new Error("Mensaje PAI incompleto");
     }
-    ws.send(msg);
-}
 
-function connect() {
-    const proto = location.protocol === "https:" ? "wss" : "ws";
-    ws = new WebSocket(`${proto}://${location.host}/irp`);
-    ws.binaryType = "arraybuffer";
-
-    ws.onopen = () => {
-        statusEl.textContent = "Conectado";
-        sendIrp("LIST");
-    };
-
-    ws.onclose = () => statusEl.textContent = "Desconectado";
-    ws.onerror = () => statusEl.textContent = "Error de conexión";
-
-    ws.onmessage = async (ev) => {
-        if (typeof ev.data === "string") {
-            handleText(ev.data);
-        } else {
-            await handleBinary(ev.data);
-        }
-    };
-}
-
-function parseHeaders(text) {
-    const lines = text.replace(/\r/g, "").split("\n");
-    const obj = { status: lines[0] };
-    for (let i = 1; i < lines.length; i++) {
-        const idx = lines[i].indexOf(":");
-        if (idx > 0) {
-            obj[lines[i].slice(0, idx).trim().toLowerCase()] =
-                lines[i].slice(idx + 1).trim();
+    for (let index = 0; index < PAI_MAGIC.length; index++) {
+        if (view.getUint8(index) !== PAI_MAGIC[index]) {
+            throw new Error("Firma PAI invalida");
         }
     }
-    return obj;
+    if (view.getUint8(PAI_MAGIC.length) !== PaiProtocol.VERSION) {
+        throw new Error("Version PAI no soportada");
+    }
+    return view.getUint8(PAI_MAGIC.length + 1);
 }
 
-function handleText(text) {
-    const h = parseHeaders(text);
+function requirePaiMessage(buffer, expectedOpcode, minimumPayloadBytes = 0) {
+    const opcode = readPaiOpcode(buffer, minimumPayloadBytes);
+    if (opcode !== expectedOpcode) {
+        throw new Error("Operacion PAI inesperada");
+    }
+    return new DataView(buffer);
+}
 
-    if (h.status?.startsWith("IRP/1.0 404") ||
-        h.status?.startsWith("IRP/1.0 409") ||
-        h.status?.startsWith("IRP/1.0 500")) {
-        console.error(text);
-        return;
+// Paso 4
+function encodeListImages() {
+    return createPaiMessage(PaiOpcode.LIST_IMAGES).buffer;
+}
+
+function readText(view, state) {
+    if (state.offset + 2 > view.byteLength) {
+        throw new Error("IMAGE_LIST incompleto");
+    }
+    const length = view.getUint16(state.offset);
+    state.offset += 2;
+    if (length < 1 || state.offset + length > view.byteLength) {
+        throw new Error("Texto invalido en IMAGE_LIST");
     }
 
-    if (h["content-type"] === "image/jpeg") {
-        expectedBinary = {
-            image: h.image,
-            level: Number(h.level),
-            x: Number(h.x),
-            y: Number(h.y)
-        };
-        return;
+    const bytes = new Uint8Array(view.buffer, state.offset, length);
+    state.offset += length;
+    return new TextDecoder("utf-8", {fatal: true}).decode(bytes);
+}
+
+function decodeImageList(buffer) {
+    const view = requirePaiMessage(buffer, PaiOpcode.IMAGE_LIST, 2);
+    const count = view.getUint16(PAI_HEADER_BYTES);
+    if (count > PaiLimits.MAX_IMAGES) {
+        throw new Error("IMAGE_LIST excede el maximo de imagenes");
     }
 
-    if (h.count !== undefined) {
-        const ids = [...text.matchAll(/^Image:\s*(.+)$/gm)].map(m => m[1].trim());
-        images = ids;
-        imageSelect.innerHTML = ids.map(id => `<option>${id}</option>`).join("");
-        if (ids.length > 0) {
-            selectImage(ids[0]);
-        } else {
-            statusEl.textContent = "No hay imágenes en images/originals";
+    const state = {offset: PAI_HEADER_BYTES + 2};
+    const images = [];
+    for (let index = 0; index < count; index++) {
+        const id = readText(view, state);
+        const name = readText(view, state);
+        if (state.offset + 16 > view.byteLength) {
+            throw new Error("Metadatos incompletos en IMAGE_LIST");
         }
-        return;
+
+        const width = view.getUint32(state.offset);
+        state.offset += 4;
+        const height = view.getUint32(state.offset);
+        state.offset += 4;
+        const sizeBytes = Number(view.getBigUint64(state.offset));
+        state.offset += 8;
+        if (width < 1 || height < 1 || !Number.isSafeInteger(sizeBytes)) {
+            throw new Error("Metadatos invalidos en IMAGE_LIST");
+        }
+        images.push({id, name, width, height, sizeBytes});
     }
 
-    if (h.width && h.height && h.levels) {
-        current = {
-            id: h.image,
-            width: Number(h.width),
-            height: Number(h.height),
-            tileSize: Number(h["tile-size"]),
-            levels: Number(h.levels),
-            sourceBytes: Number(h["source-bytes"] || 0),
-            processor: h.processor || "-"
-        };
-        currentLevel = Math.max(0, current.levels - 2);
-        centerImage();
-        clearTiles();
-        updateUi();
-        requestVisibleTiles();
+    if (state.offset !== view.byteLength) {
+        throw new Error("IMAGE_LIST contiene bytes adicionales");
     }
+    return images;
 }
 
-async function handleBinary(arrayBuffer) {
-    if (!expectedBinary) return;
-
-    const meta = expectedBinary;
-    expectedBinary = null;
-    const key = tileKey(meta.level, meta.x, meta.y);
-
-    const blob = new Blob([arrayBuffer], { type: "image/jpeg" });
-    const bmp = await createImageBitmap(blob);
-
-    pending.delete(key);
-
-    if (meta.level !== currentLevel || meta.image !== current?.id) {
-        bmp.close();
-        return;
+function decodeViewStart(buffer) {
+    const view = requirePaiMessage(buffer, PaiOpcode.VIEW_START);
+    if (view.byteLength !== VIEW_START_BYTES) {
+        throw new Error("VIEW_START tiene una longitud invalida");
     }
 
-    tileCache.set(key, bmp);
-    bytesReceived += arrayBuffer.byteLength;
-    tileCountEl.textContent = tileCache.size;
-    bytesCountEl.textContent = `${(bytesReceived / 1024).toFixed(1)} KB`;
+    let offset = PAI_HEADER_BYTES;
+    const generationId = view.getBigUint64(offset);
+    offset += 8;
+    const viewportWidth = view.getUint32(offset);
+    offset += 4;
+    const viewportHeight = view.getUint32(offset);
+    offset += 4;
+    const zoomIndex = view.getUint32(offset);
+    offset += 4;
+    const regionX = view.getUint32(offset);
+    offset += 4;
+    const regionY = view.getUint32(offset);
+    offset += 4;
+    const regionWidth = view.getUint32(offset);
+    offset += 4;
+    const regionHeight = view.getUint32(offset);
+    offset += 4;
+    const chunkCount = view.getUint32(offset);
 
-    draw();
-}
-
-function selectImage(id) {
-    clearTiles();
-    sendIrp("INFO", { Image: id });
-}
-
-imageSelect.addEventListener("change", () => selectImage(imageSelect.value));
-
-document.getElementById("minusBtn").addEventListener("click", () => {
-    if (!current || currentLevel <= 0) return;
-    currentLevel--;
-    levelChanged();
-});
-
-document.getElementById("plusBtn").addEventListener("click", () => {
-    if (!current || currentLevel >= current.levels - 1) return;
-    currentLevel++;
-    levelChanged();
-});
-
-document.getElementById("centerBtn").addEventListener("click", () => {
-    centerImage();
-    draw();
-    requestVisibleTiles();
-});
-
-function levelChanged() {
-    clearTiles();
-    centerImage();
-    updateUi();
-    draw();
-    requestVisibleTiles();
-}
-
-function clearTiles() {
-    for (const bmp of tileCache.values()) bmp.close();
-    tileCache.clear();
-    pending.clear();
-    tileCountEl.textContent = "0";
-}
-
-function levelScale() {
-    if (!current) return 1;
-    return Math.pow(2, currentLevel - (current.levels - 1));
-}
-
-function levelDimensions() {
-    const s = levelScale();
+    if (generationId < 1n || viewportWidth < 1 || viewportHeight < 1
+            || regionWidth < 1 || regionHeight < 1
+            || chunkCount < 1 || chunkCount > PaiLimits.MAX_CHUNKS_PER_VIEW) {
+        throw new Error("VIEW_START contiene valores invalidos");
+    }
     return {
-        width: Math.max(1, Math.round(current.width * s)),
-        height: Math.max(1, Math.round(current.height * s))
+        generationId,
+        viewportWidth,
+        viewportHeight,
+        zoomIndex,
+        regionX,
+        regionY,
+        regionWidth,
+        regionHeight,
+        chunkCount
     };
 }
 
-function centerImage() {
-    if (!current) return;
-    const d = levelDimensions();
-    offsetX = (canvas.width - d.width) / 2;
-    offsetY = (canvas.height - d.height) / 2;
+function decodeChunk(buffer) {
+    const view = requirePaiMessage(buffer, PaiOpcode.CHUNK);
+    if (view.byteLength < CHUNK_METADATA_BYTES) {
+        throw new Error("CHUNK incompleto");
+    }
+
+    let offset = PAI_HEADER_BYTES;
+    const generationId = view.getBigUint64(offset);
+    offset += 8;
+    const index = view.getUint32(offset);
+    offset += 4;
+    const column = view.getUint32(offset);
+    offset += 4;
+    const row = view.getUint32(offset);
+    offset += 4;
+    const canvasX = view.getInt32(offset);
+    offset += 4;
+    const canvasY = view.getInt32(offset);
+    offset += 4;
+    const width = view.getUint32(offset);
+    offset += 4;
+    const height = view.getUint32(offset);
+    offset += 4;
+    const jpegBytes = view.getUint32(offset);
+    offset += 4;
+
+    if (generationId < 1n || width < 1 || height < 1 || jpegBytes < 4
+            || jpegBytes > PaiLimits.MAX_JPEG_BYTES
+            || offset + jpegBytes !== view.byteLength) {
+        throw new Error("CHUNK contiene valores invalidos");
+    }
+    const jpeg = new Uint8Array(buffer, offset, jpegBytes);
+    if (jpeg[0] !== 0xff || jpeg[1] !== 0xd8
+            || jpeg[jpeg.length - 2] !== 0xff || jpeg[jpeg.length - 1] !== 0xd9) {
+        throw new Error("CHUNK no contiene un JPEG valido");
+    }
+    return {generationId, index, column, row, canvasX, canvasY, width, height, jpegBytes};
 }
 
-function tileKey(level, x, y) {
-    return `${level}:${x}:${y}`;
+function decodeViewEnd(buffer) {
+    const view = requirePaiMessage(buffer, PaiOpcode.VIEW_END);
+    if (view.byteLength !== VIEW_END_BYTES) {
+        throw new Error("VIEW_END tiene una longitud invalida");
+    }
+    return {
+        generationId: view.getBigUint64(PAI_HEADER_BYTES),
+        chunkCount: view.getUint32(PAI_HEADER_BYTES + 8),
+        totalJpegBytes: view.getBigUint64(PAI_HEADER_BYTES + 12)
+    };
 }
 
-function requestVisibleTiles() {
-    if (!current) return;
-    const d = levelDimensions();
-    const ts = current.tileSize;
+// Paso 5
+function encodeView(request) {
+    const imageId = new TextEncoder().encode(request.imageId);
+    const message = createPaiMessage(
+        PaiOpcode.VIEW,
+        VIEW_BODY_BYTES + imageId.length
+    );
+    const {buffer, view} = message;
+    let {offset} = message;
 
-    const left = Math.max(0, -offsetX);
-    const top = Math.max(0, -offsetY);
-    const right = Math.min(d.width, canvas.width - offsetX);
-    const bottom = Math.min(d.height, canvas.height - offsetY);
+    view.setBigUint64(offset, request.generationId);
+    offset += 8;
+    view.setInt32(offset, request.zoomIndex);
+    offset += 4;
+    view.setInt32(offset, request.centerX);
+    offset += 4;
+    view.setInt32(offset, request.centerY);
+    offset += 4;
+    view.setInt32(offset, request.viewportWidth);
+    offset += 4;
+    view.setInt32(offset, request.viewportHeight);
+    offset += 4;
+    view.setUint16(offset, imageId.length);
+    offset += 2;
+    new Uint8Array(buffer, offset).set(imageId);
+    return buffer;
+}
 
-    if (right <= left || bottom <= top) return;
+function createExampleView() {
+    const image = catalog.get(imageSelect.value);
+    if (!image) return null;
 
-    const x0 = Math.max(0, Math.floor(left / ts));
-    const y0 = Math.max(0, Math.floor(top / ts));
-    const x1 = Math.min(Math.ceil(d.width / ts) - 1, Math.floor((right - 1) / ts));
-    const y1 = Math.min(Math.ceil(d.height / ts) - 1, Math.floor((bottom - 1) / ts));
+    return {
+        generationId: generationId++,
+        imageId: image.id,
+        zoomIndex: 0,
+        centerX: Math.floor(image.width / 2),
+        centerY: Math.floor(image.height / 2),
+        viewportWidth: 1100,
+        viewportHeight: 650
+    };
+}
 
-    for (let y = y0; y <= y1; y++) {
-        for (let x = x0; x <= x1; x++) {
-            const key = tileKey(currentLevel, x, y);
-            if (!tileCache.has(key) && !pending.has(key)) {
-                pending.add(key);
-                sendIrp("TILE", {
-                    Image: current.id,
-                    Level: currentLevel,
-                    X: x,
-                    Y: y
-                });
-            }
+// Paso 6
+function formatBytes(bytes) {
+    const units = ["B", "KiB", "MiB", "GiB"];
+    let value = bytes;
+    let unit = 0;
+    while (value >= 1024 && unit < units.length - 1) {
+        value /= 1024;
+        unit++;
+    }
+    return value.toFixed(unit === 0 ? 0 : 1) + " " + units[unit];
+}
+
+function showSelectedImage() {
+    const image = catalog.get(imageSelect.value);
+    imageInfoElement.textContent = image
+        ? image.width + " × " + image.height + " píxeles | " + formatBytes(image.sizeBytes)
+        : "Ninguna imagen seleccionada";
+}
+
+function showCatalog(images) {
+    catalog.clear();
+    imageSelect.replaceChildren();
+    for (const image of images) {
+        catalog.set(image.id, image);
+        const option = document.createElement("option");
+        option.value = image.id;
+        option.textContent = image.name;
+        imageSelect.append(option);
+    }
+
+    const hasImages = images.length > 0;
+    imageSelect.disabled = !hasImages;
+    sendValidButton.disabled = !hasImages;
+    sendInvalidButton.disabled = !hasImages;
+    catalogStatusElement.textContent = images.length + " imagen(es) disponible(s)";
+    showSelectedImage();
+}
+
+function requireOpenSocket() {
+    if (socket.readyState !== WebSocket.OPEN) {
+        viewStatusElement.textContent = "El WebSocket no está conectado";
+        return false;
+    }
+    return true;
+}
+
+function receiveViewStart(buffer) {
+    const message = decodeViewStart(buffer);
+    if (message.generationId !== latestRequestedGenerationId) return;
+
+    activeView = {
+        ...message,
+        receivedIndexes: new Set(),
+        receivedBytes: 0n
+    };
+    viewStatusElement.textContent =
+        `VIEW ${message.generationId}: esperando ${message.chunkCount} chunks`;
+}
+
+function receiveChunk(buffer) {
+    const message = decodeChunk(buffer);
+    if (!activeView || message.generationId !== activeView.generationId) return;
+    if (message.index >= activeView.chunkCount
+            || activeView.receivedIndexes.has(message.index)) {
+        throw new Error("CHUNK duplicado o fuera de rango");
+    }
+
+    activeView.receivedIndexes.add(message.index);
+    activeView.receivedBytes += BigInt(message.jpegBytes);
+    viewStatusElement.textContent =
+        `VIEW ${message.generationId}: ${activeView.receivedIndexes.size}/${activeView.chunkCount} chunks`;
+}
+
+function receiveViewEnd(buffer) {
+    const message = decodeViewEnd(buffer);
+    if (!activeView || message.generationId !== activeView.generationId) return;
+    if (message.chunkCount !== activeView.chunkCount
+            || activeView.receivedIndexes.size !== activeView.chunkCount
+            || message.totalJpegBytes !== activeView.receivedBytes) {
+        throw new Error("VIEW_END no coincide con los chunks recibidos");
+    }
+
+    viewStatusElement.textContent =
+        `VIEW ${message.generationId} completa: ${message.chunkCount} chunks, `
+        + formatBytes(Number(message.totalJpegBytes));
+}
+
+// Paso 7
+socket.addEventListener("open", () => {
+    statusElement.textContent = "Conectado: handshake completado";
+    catalogStatusElement.textContent = "Solicitando catálogo...";
+    socket.send(encodeListImages());
+});
+
+socket.addEventListener("message", (event) => {
+    let opcode;
+    try {
+        if (!(event.data instanceof ArrayBuffer)) {
+            throw new Error("Se esperaba una respuesta binaria");
+        }
+        opcode = readPaiOpcode(event.data);
+        switch (opcode) {
+            case PaiOpcode.IMAGE_LIST:
+                showCatalog(decodeImageList(event.data));
+                break;
+            case PaiOpcode.VIEW_START:
+                receiveViewStart(event.data);
+                break;
+            case PaiOpcode.CHUNK:
+                receiveChunk(event.data);
+                break;
+            case PaiOpcode.VIEW_END:
+                receiveViewEnd(event.data);
+                break;
+            default:
+                throw new Error("Operacion PAI no esperada: " + opcode);
+        }
+    } catch (error) {
+        if (opcode === PaiOpcode.IMAGE_LIST) {
+            catalogStatusElement.textContent = "Catálogo rechazado: " + error.message;
+        } else {
+            viewStatusElement.textContent = "Respuesta VIEW rechazada: " + error.message;
         }
     }
-}
-
-function draw() {
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.fillStyle = "#0b1020";
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-    if (!current) return;
-    const ts = current.tileSize;
-
-    for (const [key, bmp] of tileCache.entries()) {
-        const [level, x, y] = key.split(":").map(Number);
-        if (level !== currentLevel) continue;
-        ctx.drawImage(bmp, offsetX + x * ts, offsetY + y * ts);
-    }
-
-    ctx.strokeStyle = "rgba(255,255,255,.2)";
-    ctx.strokeRect(offsetX, offsetY, levelDimensions().width, levelDimensions().height);
-}
-
-function updateUi() {
-    if (!current) return;
-    const d = levelDimensions();
-    levelLabel.textContent = `Nivel ${currentLevel + 1}/${current.levels}`;
-    resolutionEl.textContent = `${d.width} × ${d.height}`;
-    processorEl.textContent = current.processor;
-    sourceSizeEl.textContent = formatBytes(current.sourceBytes);
-}
-
-canvas.addEventListener("mousedown", e => {
-    dragging = true;
-    canvas.classList.add("dragging");
-    dragStartX = e.offsetX;
-    dragStartY = e.offsetY;
-    startOffsetX = offsetX;
-    startOffsetY = offsetY;
 });
 
-window.addEventListener("mouseup", () => {
-    dragging = false;
-    canvas.classList.remove("dragging");
+socket.addEventListener("close", () => {
+    statusElement.textContent = "Desconectado";
+    imageSelect.disabled = true;
+    sendValidButton.disabled = true;
+    sendInvalidButton.disabled = true;
 });
 
-canvas.addEventListener("mousemove", e => {
-    if (!dragging) return;
-    offsetX = startOffsetX + (e.offsetX - dragStartX);
-    offsetY = startOffsetY + (e.offsetY - dragStartY);
-    draw();
-    requestVisibleTiles();
+socket.addEventListener("error", () => {
+    statusElement.textContent = "Error de conexión";
 });
 
-function formatBytes(bytes) {
-    if (!bytes) return "-";
-    const units = ["B", "KB", "MB", "GB", "TB"];
-    let value = bytes;
-    let i = 0;
-    while (value >= 1024 && i < units.length - 1) {
-        value /= 1024;
-        i++;
-    }
-    return `${value.toFixed(i >= 3 ? 2 : 1)} ${units[i]}`;
-}
+// Paso 8
+imageSelect.addEventListener("change", showSelectedImage);
 
-connect();
+sendValidButton.addEventListener("click", () => {
+    if (!requireOpenSocket()) return;
+    const request = createExampleView();
+    if (!request) return;
+
+    latestRequestedGenerationId = request.generationId;
+    activeView = null;
+    socket.send(encodeView(request));
+    viewStatusElement.textContent =
+        `VIEW ${request.generationId} enviado para ${request.imageId}`;
+});
+
+sendInvalidButton.addEventListener("click", () => {
+    if (!requireOpenSocket()) return;
+    const request = createExampleView();
+    if (!request) return;
+
+    const invalid = new Uint8Array(encodeView(request));
+    invalid[0] ^= 0x01;
+    socket.send(invalid);
+    viewStatusElement.textContent = "VIEW inválido enviado; el servidor debe rechazarlo";
+});

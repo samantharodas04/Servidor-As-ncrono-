@@ -1,48 +1,29 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="es">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Ultra Image Viewer</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Servidor asíncrono de imágenes</title>
     <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-<header>
-    <h1>Ultra Image Viewer</h1>
-    <p>Servidor asíncrono Java + protocolo IRP/1.0</p>
-</header>
-
 <main>
-    <section class="toolbar">
-        <label>Imagen:
-            <select id="imageSelect"></select>
-        </label>
-
-        <button id="minusBtn">− resolución</button>
-        <span id="levelLabel">Nivel -</span>
-        <button id="plusBtn">+ resolución</button>
-        <button id="centerBtn">Centrar</button>
-    </section>
-
-    <section class="viewer-wrap">
-        <canvas id="viewer" width="1100" height="650"></canvas>
-    </section>
-
-    <section class="stats">
-        <div><strong>Estado:</strong> <span id="status">Conectando...</span></div>
-        <div><strong>Tiles cargados:</strong> <span id="tileCount">0</span></div>
-        <div><strong>Datos recibidos:</strong> <span id="bytesCount">0 KB</span></div>
-        <div><strong>Resolución actual:</strong> <span id="resolution">-</span></div>
-        <div><strong>Procesador:</strong> <span id="processor">-</span></div>
-        <div><strong>Archivo fuente:</strong> <span id="sourceSize">-</span></div>
-    </section>
-
-    <section class="help">
-        <p>Arrastra la imagen para moverte. Cambia de nivel con los botones de resolución.
-           Cuando cambia el nivel, los tiles anteriores se eliminan del cliente.</p>
-    </section>
+    <h1>Servidor asíncrono de imágenes</h1>
+    <p>Prueba del transporte binario PAI/1 para vistas por chunks.</p>
+    <p><strong>WebSocket:</strong> <span id="connectionStatus">Conectando...</span></p>
+    <p><strong>Catálogo:</strong> <span id="catalogStatus">Pendiente</span></p>
+    <p>
+        <label for="imageSelect">Imagen disponible:</label>
+        <select id="imageSelect" disabled></select>
+    </p>
+    <p id="imageInfo">Ninguna imagen seleccionada</p>
+    <p>
+        <button id="sendValidView" disabled>Enviar VIEW válido</button>
+        <button id="sendInvalidView" disabled>Enviar VIEW inválido</button>
+    </p>
+    <p><strong>Última acción:</strong> <span id="viewStatus">Ninguna</span></p>
+    <p>Este hito recibe y valida los JPEG; el canvas se construirá después.</p>
 </main>
-
 <script src="/app.js"></script>
 </body>
 </html>
