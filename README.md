@@ -30,6 +30,8 @@ El flujo nuevo ya incluye:
 `Main` inicia el servidor y el frontend permite enviar un `VIEW` válido o uno
 inválido. El servidor procesa cada vista, envía sus chunks JPEG y el navegador
 valida la generación, la cantidad de chunks y el total de bytes recibidos.
+Después decodifica los JPEG y los dibuja en un canvas en las posiciones de
+cada chunk.
 
 La secuencia de respuesta utiliza números big-endian:
 
@@ -78,4 +80,5 @@ binarios PAI se encuentra en [docs/README.md](docs/README.md).
 
 ## Próximo hito
 
-Construir el canvas y dibujar cada JPEG en las coordenadas incluidas en `CHUNK`.
+Agregar interacción de movimiento y zoom; por ahora la vista es fija y no
+descarta chunks individualmente.

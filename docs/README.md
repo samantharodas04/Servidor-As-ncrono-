@@ -474,9 +474,11 @@ de esta cola.
 - verificar inicio y final de cada JPEG;
 - detectar índices duplicados o fuera de rango;
 - comprobar la cantidad y la suma total de bytes;
-- ignorar respuestas de una generación que ya no es la solicitada.
+- ignorar respuestas de una generación que ya no es la solicitada;
+- decodificar los JPEG y dibujarlos en un canvas según `canvasX` y `canvasY`;
+- esperar a que terminen de dibujarse antes de marcar la vista como completa.
 
-Actualmente muestra el progreso en texto:
+También muestra el progreso en texto:
 
 ```text
 VIEW 1: 3/4 chunks
@@ -485,18 +487,10 @@ VIEW 1 completa: 4 chunks, 63.7 KiB
 
 ## 15. Qué falta
 
-El siguiente paso es visual, no de transporte:
-
-```text
-1. Crear un canvas de 1100 × 650.
-2. Convertir cada JPEG recibido en una imagen dibujable.
-3. Dibujarlo en canvasX, canvasY.
-4. Usar outputWidth y outputHeight.
-5. Liberar los objetos temporales del navegador.
-```
-
-Después se podrán agregar botones o gestos de zoom y desplazamiento. Cada cambio
-creará una nueva generación y permitirá descartar la vista anterior.
+El canvas muestra una vista fija de 1100 × 650. Los chunks que sobresalen se
+recortan automáticamente; el navegador libera cada bitmap temporal después de
+dibujarlo. Aún faltan los controles de movimiento y zoom, así como la gestión
+individual de chunks durante el desplazamiento.
 
 ## 16. Archivos principales
 

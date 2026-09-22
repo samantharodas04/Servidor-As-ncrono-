@@ -36,6 +36,8 @@ const sendInvalidButton = document.getElementById("sendInvalidView");
 const imageSelect = document.getElementById("imageSelect");
 const imageInfoElement = document.getElementById("imageInfo");
 const catalogStatusElement = document.getElementById("catalogStatus");
+const imageCanvas = document.getElementById("imageCanvas");
+const canvasContext = imageCanvas.getContext("2d");
 
 const scheme = window.location.protocol === "https:" ? "wss" : "ws";
 const socket = new WebSocket(`${scheme}://${window.location.host}/pai`);
@@ -217,7 +219,7 @@ function decodeChunk(buffer) {
             || jpeg[jpeg.length - 2] !== 0xff || jpeg[jpeg.length - 1] !== 0xd9) {
         throw new Error("CHUNK no contiene un JPEG valido");
     }
-    return {generationId, index, column, row, canvasX, canvasY, width, height, jpegBytes};
+    return {generationId, index, column, row, canvasX, canvasY, width, height, jpegBytes, jpeg};
 }
 
 function decodeViewEnd(buffer) {
@@ -325,13 +327,30 @@ function receiveViewStart(buffer) {
     const message = decodeViewStart(buffer);
     if (message.generationId !== latestRequestedGenerationId) return;
 
+    imageCanvas.width = message.viewportWidth;
+    imageCanvas.height = message.viewportHeight;
     activeView = {
         ...message,
         receivedIndexes: new Set(),
-        receivedBytes: 0n
+        receivedBytes: 0n,
+        drawTasks: []
     };
     viewStatusElement.textContent =
         `VIEW ${message.generationId}: esperando ${message.chunkCount} chunks`;
+}
+
+async function drawChunk(view, message) {
+    const bitmap = await createImageBitmap(new Blob([message.jpeg], {type: "image/jpeg"}));
+    try {
+        if (bitmap.width !== message.width || bitmap.height !== message.height) {
+            throw new Error("El tamaño JPEG no coincide con CHUNK");
+        }
+        if (activeView === view) {
+            canvasContext.drawImage(bitmap, message.canvasX, message.canvasY);
+        }
+    } finally {
+        bitmap.close();
+    }
 }
 
 function receiveChunk(buffer) {
@@ -346,17 +365,34 @@ function receiveChunk(buffer) {
     activeView.receivedBytes += BigInt(message.jpegBytes);
     viewStatusElement.textContent =
         `VIEW ${message.generationId}: ${activeView.receivedIndexes.size}/${activeView.chunkCount} chunks`;
+
+    const view = activeView;
+    const drawTask = drawChunk(view, message);
+    view.drawTasks.push(drawTask);
+    drawTask.catch((error) => {
+        if (activeView === view) {
+            viewStatusElement.textContent = "No se pudo dibujar un CHUNK: " + error.message;
+        }
+    });
 }
 
-function receiveViewEnd(buffer) {
+async function receiveViewEnd(buffer) {
     const message = decodeViewEnd(buffer);
     if (!activeView || message.generationId !== activeView.generationId) return;
-    if (message.chunkCount !== activeView.chunkCount
-            || activeView.receivedIndexes.size !== activeView.chunkCount
-            || message.totalJpegBytes !== activeView.receivedBytes) {
+    const view = activeView;
+    if (message.chunkCount !== view.chunkCount
+            || view.receivedIndexes.size !== view.chunkCount
+            || message.totalJpegBytes !== view.receivedBytes) {
         throw new Error("VIEW_END no coincide con los chunks recibidos");
     }
 
+    try {
+        await Promise.all(view.drawTasks);
+    } catch (error) {
+        if (activeView === view) throw error;
+        return;
+    }
+    if (activeView !== view) return;
     viewStatusElement.textContent =
         `VIEW ${message.generationId} completa: ${message.chunkCount} chunks, `
         + formatBytes(Number(message.totalJpegBytes));
@@ -369,7 +405,7 @@ socket.addEventListener("open", () => {
     socket.send(encodeListImages());
 });
 
-socket.addEventListener("message", (event) => {
+socket.addEventListener("message", async (event) => {
     let opcode;
     try {
         if (!(event.data instanceof ArrayBuffer)) {
@@ -387,7 +423,7 @@ socket.addEventListener("message", (event) => {
                 receiveChunk(event.data);
                 break;
             case PaiOpcode.VIEW_END:
-                receiveViewEnd(event.data);
+                await receiveViewEnd(event.data);
                 break;
             default:
                 throw new Error("Operacion PAI no esperada: " + opcode);

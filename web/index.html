@@ -18,11 +18,12 @@
     </p>
     <p id="imageInfo">Ninguna imagen seleccionada</p>
     <p>
-        <button id="sendValidView" disabled>Enviar VIEW válido</button>
+        <button id="sendValidView" disabled>Mostrar imagen</button>
         <button id="sendInvalidView" disabled>Enviar VIEW inválido</button>
     </p>
     <p><strong>Última acción:</strong> <span id="viewStatus">Ninguna</span></p>
-    <p>Este hito recibe y valida los JPEG; el canvas se construirá después.</p>
+    <canvas id="imageCanvas" width="1100" height="650" aria-label="Vista de la imagen seleccionada"></canvas>
+    <p>Los JPEG recibidos se dibujan en el canvas. Movimiento y zoom interactivo quedan para después.</p>
 </main>
 <script src="/app.js"></script>
 </body>
