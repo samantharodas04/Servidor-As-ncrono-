@@ -43,6 +43,17 @@
 
             <button id="sendValidView" class="primary-button" disabled>Mostrar imagen</button>
 
+            <div id="overviewPanel" class="minimap" aria-label="Ubicación en la imagen" hidden>
+                <span class="minimap-label">VISTA GENERAL</span>
+                <div id="overviewFrame" class="minimap-frame" role="group" tabindex="0"
+                    aria-label="Centrar vista desde la miniatura; flechas para mover"
+                    title="Clic o arrastra para centrar la vista">
+                    <canvas id="overviewCanvas" width="220" height="150"
+                        aria-label="Miniatura de la imagen completa"></canvas>
+                    <div id="overviewMarker" class="minimap-marker" aria-hidden="true"></div>
+                </div>
+            </div>
+
             <div class="sidebar-divider"></div>
             <div class="info-card subtle">
                 <span class="eyebrow">CACHÉ DEL NAVEGADOR</span>
@@ -72,16 +83,6 @@
             <div class="canvas-stage">
                 <canvas id="imageCanvas" width="1100" height="650"
                     aria-label="Vista de la imagen seleccionada"></canvas>
-                <div id="overviewPanel" class="minimap" aria-label="Ubicación en la imagen" hidden>
-                    <span class="minimap-label">VISTA GENERAL</span>
-                    <div id="overviewFrame" class="minimap-frame" role="group" tabindex="0"
-                        aria-label="Centrar vista desde la miniatura; flechas para mover"
-                        title="Clic o arrastra para centrar la vista">
-                        <canvas id="overviewCanvas" width="220" height="150"
-                            aria-label="Miniatura de la imagen completa"></canvas>
-                        <div id="overviewMarker" class="minimap-marker" aria-hidden="true"></div>
-                    </div>
-                </div>
             </div>
 
             <div class="viewer-footer">

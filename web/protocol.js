@@ -13,7 +13,9 @@ const PaiOpcode = Object.freeze({
     VIEW_START: 4,
     CHUNK: 5,
     VIEW_END: 6,
-    CHUNK_PNG: 7
+    CHUNK_PNG: 7,
+    VIEW_ERROR: 8,
+    CHUNK_ACK: 9
 });
 
 const PaiLimits = Object.freeze({
@@ -222,6 +224,19 @@ function decodeViewEnd(buffer) {
     };
 }
 
+function decodeViewError(buffer) {
+    const view = requirePaiMessage(buffer, PaiOpcode.VIEW_ERROR, 10);
+    const length = view.getUint16(PAI_HEADER_BYTES + 8);
+    if (length > 240 || view.byteLength !== PAI_HEADER_BYTES + 10 + length) {
+        throw new Error("VIEW_ERROR tiene una longitud invalida");
+    }
+    const bytes = new Uint8Array(buffer, PAI_HEADER_BYTES + 10, length);
+    return {
+        generationId: view.getBigUint64(PAI_HEADER_BYTES),
+        message: new TextDecoder("utf-8", {fatal: true}).decode(bytes)
+    };
+}
+
 function encodeView(request) {
     const imageId = new TextEncoder().encode(request.imageId);
     const message = createPaiMessage(
@@ -249,5 +264,12 @@ function encodeView(request) {
     return buffer;
 }
 
-export {PaiOpcode, encodeListImages, encodeView, readPaiOpcode,
-    decodeImageList, decodeViewStart, decodeChunk, decodeViewEnd};
+function encodeChunkAck(generationId, chunkIndex) {
+    const {buffer, view, offset} = createPaiMessage(PaiOpcode.CHUNK_ACK, 12);
+    view.setBigUint64(offset, generationId);
+    view.setUint32(offset + 8, chunkIndex);
+    return buffer;
+}
+
+export {PaiOpcode, encodeListImages, encodeView, encodeChunkAck, readPaiOpcode,
+    decodeImageList, decodeViewStart, decodeChunk, decodeViewEnd, decodeViewError};

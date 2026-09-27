@@ -47,7 +47,18 @@ public final class ViewCoordinator implements AutoCloseable {
             Consumer<ViewResult> onSuccess,
             Consumer<Throwable> onFailure
     ) {
+        return submit(request, new ViewProgress() { }, onSuccess, onFailure);
+    }
+
+    /** Entrega START y chunks desde el hilo de la vista, sin bloquear el hilo de red. */
+    public synchronized Future<ViewResult> submit(
+            ViewRequest request,
+            ViewProgress progress,
+            Consumer<ViewResult> onSuccess,
+            Consumer<Throwable> onFailure
+    ) {
         Objects.requireNonNull(request, "request");
+        Objects.requireNonNull(progress, "progress");
         Objects.requireNonNull(onSuccess, "onSuccess");
         Objects.requireNonNull(onFailure, "onFailure");
         if (closed) {
@@ -70,7 +81,7 @@ public final class ViewCoordinator implements AutoCloseable {
         latestGenerationId = request.generationId();
         activeTask = requestExecutor.submit(() -> {
             try {
-                ViewResult result = processor.render(request);
+                ViewResult result = processor.render(request, progress);
                 onSuccess.accept(result);
                 return result;
             } catch (Exception failure) {

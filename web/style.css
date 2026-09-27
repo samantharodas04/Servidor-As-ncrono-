@@ -155,27 +155,23 @@ button:focus-visible, select:focus-visible, summary:focus-visible {
 }
 #imageCanvas.dragging { cursor: grabbing; }
 .minimap {
-    position: absolute;
-    right: 38px;
-    bottom: 38px;
-    width: 236px;
-    padding: 8px;
-    border: 1px solid rgba(255, 255, 255, .7);
-    border-radius: 10px;
-    background: rgba(15, 31, 46, .92);
-    box-shadow: 0 8px 26px rgba(0, 0, 0, .34);
-    pointer-events: auto;
+    width: 100%;
+    margin-top: 18px;
+    padding: 12px;
+    border: 1px solid #dce6ee;
+    border-radius: 12px;
+    background: #f7fafc;
 }
 .minimap[hidden] { display: none; }
 .minimap-label {
     display: block;
     margin-bottom: 5px;
-    color: #fff;
+    color: #57768c;
     font-size: .65rem;
     font-weight: 800;
     letter-spacing: .11em;
 }
-.minimap-frame { position: relative; cursor: crosshair; touch-action: none; }
+.minimap-frame { position: relative; cursor: crosshair; touch-action: none; background: #172b3e; border-radius: 6px; overflow: hidden; }
 .minimap-frame.dragging { cursor: grabbing; }
 .minimap-frame:focus-visible { outline: 3px solid #75b9fa; outline-offset: 3px; }
 #overviewCanvas { display: block; width: 100%; height: auto; background: #172b3e; }
@@ -194,6 +190,7 @@ button:focus-visible, select:focus-visible, summary:focus-visible {
     .workspace { grid-template-columns: 1fr; }
     .sidebar { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 18px; }
     .sidebar-heading, .sidebar-divider, .developer-tools { grid-column: 1 / -1; }
+    .minimap { grid-column: 1 / -1; margin-top: 0; }
     .sidebar-heading p { margin-bottom: 4px; }
     .muted { margin: 0; align-self: center; }
     .primary-button { margin-top: 0; align-self: end; }
@@ -213,6 +210,6 @@ button:focus-visible, select:focus-visible, summary:focus-visible {
     .sidebar-divider { margin: 20px 0; }
     .viewer-toolbar, .viewer-footer { flex-wrap: wrap; padding: 14px; }
     .canvas-stage { min-height: 260px; padding: 10px; }
-    .minimap { right: 20px; bottom: 20px; width: 166px; }
+    .minimap { margin-top: 18px; }
     .viewer-hint { text-align: left; }
 }

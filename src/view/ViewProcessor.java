@@ -17,6 +17,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /** Convierte VIEW en chunks JPEG o PNG; no conoce el navegador ni el WebSocket. */
 public final class ViewProcessor implements AutoCloseable {
@@ -41,6 +42,12 @@ public final class ViewProcessor implements AutoCloseable {
     }
 
     public ViewResult render(ViewRequest request) throws IOException {
+        return render(request, new ViewProgress() { });
+    }
+
+    /** Anuncia la vista y entrega cada chunk conforme termina, antes del resultado final. */
+    public ViewResult render(ViewRequest request, ViewProgress progress) throws IOException {
+        Objects.requireNonNull(progress, "progress");
         // Dentro del paso 6: calcula zoom/chunks y consulta la cache antes de abrir pixeles.
         long startedAt = System.nanoTime();
         ImageSource source = findSource(request.imageId());
@@ -74,20 +81,38 @@ public final class ViewProcessor implements AutoCloseable {
         int cacheHits = available.size();
         long preparationMillis = 0;
         long chunkMillis = 0;
+        StableChunkPlan generationPlan = null;
         if (!missing.isEmpty()) {
-            // Selecciona overview, BigTIFF u original y prepara solo el area faltante.
+            // La geometria se conoce antes de abrir el derivado o generar pixeles.
             ensureNotCancelled();
-            StableChunkPlan generationPlan = ChunkPreparationPlanner.forMissingChunks(
+            generationPlan = ChunkPreparationPlanner.forMissingChunks(
                     stablePlan, missing
             );
+        }
+
+        ensureNotCancelled();
+        progress.onStart(request, stablePlan.visibleRegion(), completePlan.chunks().size());
+        Map<PlannedChunk, Integer> indexByChunk = new LinkedHashMap<>();
+        for (int index = 0; index < completePlan.chunks().size(); index++) {
+            PlannedChunk chunk = completePlan.chunks().get(index);
+            indexByChunk.put(chunk, index);
+            RenderedChunk cached = available.get(chunk);
+            if (cached != null) {
+                ensureNotCancelled();
+                progress.onChunk(request, index, cached);
+            }
+        }
+
+        if (!missing.isEmpty()) {
+            // START ya salio: la fuente puede tardar o fallar sin ocultar la solicitud.
             PreparedSourceStore.ResolvedSource renderSource = sourceStore.resolve(
                     source, stablePlan.scaleX(), stablePlan.scaleY()
             );
-
+            // La vista temporal cubre los faltantes; los workers avisan al acabar cada uno.
             long preparationStartedAt = System.nanoTime();
             long preparationNanos;
             long chunkNanos;
-            List<RenderedChunk> generated;
+            Map<PlannedChunk, RenderedChunk> generatedByChunk = new LinkedHashMap<>();
             try (PreparedView preparedView = viewPreparer.prepare(
                     renderSource.path(), generationPlan,
                     renderSource.ratioX(), renderSource.ratioY()
@@ -96,21 +121,31 @@ public final class ViewProcessor implements AutoCloseable {
                 preparationMillis = preparationNanos / 1_000_000L;
                 ensureNotCancelled();
                 long chunksStartedAt = System.nanoTime();
-                // Los workers recortan y codifican los chunks visibles, no la imagen entera.
-                generated = workers.renderAll(
+                workers.renderAsCompleted(
                         preparedView.path(), generationPlan.chunkPlan(),
-                        zoomLevel.scale() > 1.0 ? 92 : 85, losslessChunks
+                        zoomLevel.scale() > 1.0 ? 92 : 85, losslessChunks,
+                        rendered -> {
+                            ensureNotCancelled();
+                            Integer index = indexByChunk.get(rendered.chunk());
+                            if (index == null || generatedByChunk.putIfAbsent(
+                                    rendered.chunk(), rendered) != null) {
+                                throw new IOException("Worker entrego un chunk inesperado");
+                            }
+                            available.put(rendered.chunk(), rendered);
+                            progress.onChunk(request, index, rendered);
+                        }
                 );
                 chunkNanos = System.nanoTime() - chunksStartedAt;
                 chunkMillis = chunkNanos / 1_000_000L;
             }
 
             ensureNotCancelled();
+            List<RenderedChunk> generated = missing.stream()
+                    .map(generatedByChunk::get).toList();
             validateGeneratedChunks(missing, generated);
 
             Map<ChunkCacheKey, byte[]> completedBatch = new LinkedHashMap<>();
             for (RenderedChunk rendered : generated) {
-                available.put(rendered.chunk(), rendered);
                 completedBatch.put(
                         cacheKey(source, request, stablePlan, rendered.chunk()),
                         rendered.bytes()

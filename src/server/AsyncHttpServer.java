@@ -1,11 +1,17 @@
 package server;
 
 import image.ImageSource;
+import image.RenderedChunk;
+import protocol.ChunkAckCodec;
 import protocol.ImageCatalogCodec;
+import protocol.PaiOpcode;
+import protocol.PaiProtocol;
 import protocol.ViewResponseCodec;
 import protocol.ViewMessageCodec;
 import view.ViewCoordinator;
 import view.ViewProcessor;
+import view.ViewProgress;
+import view.ViewRegion;
 import view.ViewRequest;
 import view.ViewResult;
 
@@ -292,6 +298,13 @@ public final class AsyncHttpServer implements AutoCloseable {
             return true;
         }
 
+        if (frame.payload().length >= PaiProtocol.HEADER_BYTES
+                && Byte.toUnsignedInt(frame.payload()[4]) == PaiOpcode.CHUNK_ACK.code()) {
+            ChunkAckCodec.Ack ack = ChunkAckCodec.decode(frame.payload());
+            requireSession(client).flow.acknowledge(ack.generationId(), ack.chunkIndex());
+            return true;
+        }
+
         ViewRequest request = ViewMessageCodec.decode(frame.payload(), CHUNK_SIZE);
         System.out.printf(
                 "[PAI] VIEW recibido | generationId=%d | imageId=%s | zoomIndex=%d "
@@ -307,9 +320,30 @@ public final class AsyncHttpServer implements AutoCloseable {
         );
 
         ClientSession session = requireSession(client);
+        session.flow.begin(request.generationId());
         session.coordinator.submit(
                 request,
-                result -> sendViewResult(session, result),
+                new ViewProgress() {
+                    @Override
+                    public void onStart(ViewRequest current, ViewRegion region, int chunkCount)
+                            throws IOException {
+                        if (isCurrentSession(session, current.generationId())) {
+                            session.send(ViewResponseCodec.encodeViewStart(
+                                    current, region, chunkCount));
+                        }
+                    }
+
+                    @Override
+                    public void onChunk(ViewRequest current, int index,
+                                        RenderedChunk chunk) throws IOException {
+                        if (isCurrentSession(session, current.generationId())
+                                && session.flow.reserve(current.generationId(), index)
+                                && isCurrentSession(session, current.generationId())) {
+                            session.send(ViewResponseCodec.encodeChunk(current, index, chunk));
+                        }
+                    }
+                },
+                result -> sendViewEnd(session, result),
                 failure -> printViewFailure(session, request, failure)
         );
         return true;
@@ -323,27 +357,19 @@ public final class AsyncHttpServer implements AutoCloseable {
         return session;
     }
 
-    // 7. Envia START, cada chunk JPEG/PNG y END solo si la generacion sigue vigente.
-    private void sendViewResult(ClientSession session, ViewResult result) {
+    // 7. START y chunks salen durante render(); END confirma la vista completa.
+    private void sendViewEnd(ClientSession session, ViewResult result) {
         long generationId = result.request().generationId();
-        if (sessions.get(session.client) != session
-                || !session.coordinator.isCurrent(generationId)) {
+        if (!isCurrentSession(session, generationId)) {
             return;
         }
 
         try {
-            session.send(ViewResponseCodec.encodeViewStart(result));
-            for (int index = 0; index < result.chunks().size(); index++) {
-                if (sessions.get(session.client) != session
-                        || !session.coordinator.isCurrent(generationId)) {
-                    return;
-                }
-                session.send(ViewResponseCodec.encodeChunk(result, index));
-            }
+            if (!session.flow.awaitDrained(generationId)
+                    || !isCurrentSession(session, generationId)) return;
             session.send(ViewResponseCodec.encodeViewEnd(result));
         } catch (IOException failure) {
-            System.err.println("[PAI] No se pudo encolar VIEW: " + failure.getMessage());
-            closeClient(session.client);
+            printViewFailure(session, result.request(), failure);
             return;
         }
 
@@ -374,8 +400,7 @@ public final class AsyncHttpServer implements AutoCloseable {
             ViewRequest request,
             Throwable failure
     ) {
-        if (sessions.get(session.client) != session
-                || !session.coordinator.isCurrent(request.generationId())) {
+        if (!isCurrentSession(session, request.generationId())) {
             return;
         }
         System.err.printf(
@@ -384,6 +409,17 @@ public final class AsyncHttpServer implements AutoCloseable {
                 request.imageId(),
                 failure.getMessage()
         );
+        try {
+            session.send(ViewResponseCodec.encodeViewError(
+                    request, "No se pudo completar la vista"));
+        } catch (IOException sendFailure) {
+            closeClient(session.client);
+        }
+    }
+
+    private boolean isCurrentSession(ClientSession session, long generationId) {
+        return sessions.get(session.client) == session
+                && session.coordinator.isCurrent(generationId);
     }
 
     private void rejectWebSocket(AsynchronousSocketChannel client, String reason) {
@@ -520,6 +556,7 @@ public final class AsyncHttpServer implements AutoCloseable {
     private final class ClientSession implements AutoCloseable {
         private final AsynchronousSocketChannel client;
         private final ViewCoordinator coordinator;
+        private final ViewFlowControl flow;
         private final ArrayDeque<byte[]> pendingPayloads;
         private long queuedBytes;
         private boolean writing;
@@ -528,6 +565,7 @@ public final class AsyncHttpServer implements AutoCloseable {
         private ClientSession(AsynchronousSocketChannel client) {
             this.client = client;
             this.coordinator = ViewCoordinator.usingSharedProcessor(viewProcessor);
+            this.flow = new ViewFlowControl();
             this.pendingPayloads = new ArrayDeque<>();
         }
 
@@ -610,6 +648,7 @@ public final class AsyncHttpServer implements AutoCloseable {
                 pendingPayloads.clear();
                 queuedBytes = 0;
             }
+            flow.close();
             coordinator.close();
         }
     }

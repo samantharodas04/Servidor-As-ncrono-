@@ -1,7 +1,8 @@
 "use strict";
 
-import {PaiOpcode, encodeListImages, encodeView, readPaiOpcode,
-    decodeImageList, decodeViewStart, decodeChunk, decodeViewEnd} from "./protocol.js";
+import {PaiOpcode, encodeListImages, encodeView, encodeChunkAck, readPaiOpcode,
+    decodeImageList, decodeViewStart, decodeChunk, decodeViewEnd,
+    decodeViewError} from "./protocol.js";
 import {zoomScales as calculateZoomScales, initialView as createInitialView,
     clampVisibleCenter} from "./navigation.js";
 import {BitmapCache} from "./bitmap-cache.js";
@@ -256,7 +257,11 @@ function receiveChunk(buffer) {
     const lane = view.nextDrawLane++ % view.drawLanes.length;
     view.drawLanes[lane] = view.drawLanes[lane].then(() => {
         if (activeView !== view || view.drawError) return;
-        return drawChunk(view, message);
+        return drawChunk(view, message).then(() => {
+            if (activeView === view && socket.readyState === WebSocket.OPEN) {
+                socket.send(encodeChunkAck(view.generationId, message.index));
+            }
+        });
     }).catch((error) => {
         if (activeView === view) {
             view.drawError = error;
@@ -283,6 +288,13 @@ async function receiveViewEnd(buffer) {
     viewStatusElement.textContent =
         `VIEW ${message.generationId} completa: ${message.chunkCount} chunks, `
         + formatBytes(Number(message.totalImageBytes));
+}
+
+function receiveViewError(buffer) {
+    const message = decodeViewError(buffer);
+    if (message.generationId !== latestRequestedGenerationId) return;
+    activeView = null;
+    viewStatusElement.textContent = `VIEW ${message.generationId}: ${message.message}`;
 }
 
 // 11. El WebSocket distribuye respuestas PAI al catálogo o a la vista activa.
@@ -313,6 +325,9 @@ socket.addEventListener("message", async (event) => {
                 break;
             case PaiOpcode.VIEW_END:
                 await receiveViewEnd(event.data);
+                break;
+            case PaiOpcode.VIEW_ERROR:
+                receiveViewError(event.data);
                 break;
             default:
                 throw new Error("Operacion PAI no esperada: " + opcode);
