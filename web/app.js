@@ -1,5 +1,8 @@
 "use strict";
 
+// Cambiar a false y recargar la página para detener el zoom gigante en 1:1.
+const ENABLE_EXTRA_GIANT_ZOOM = true;
+
 // Paso 1
 const PaiProtocol = Object.freeze({
     NAME: "PAI",
@@ -274,12 +277,16 @@ function encodeView(request) {
 function zoomScales(image) {
     const base = Math.min(1, imageCanvas.width / image.width,
         imageCanvas.height / image.height);
+    const maximum = ENABLE_EXTRA_GIANT_ZOOM
+        && Math.max(image.width, image.height) >= 50000 ? 4 : 1;
     const scales = [];
     let scale = base;
     for (let index = 0; index < 64; index++) {
         scales.push(scale);
-        if (scale >= 1 - 1e-12) break;
-        scale = Math.min(1, scale * 2);
+        if (scale >= maximum - 1e-12) break;
+        scale = scale < 1 - 1e-12
+            ? Math.min(1, scale * 2)
+            : Math.min(maximum, scale * 2);
     }
     return scales;
 }

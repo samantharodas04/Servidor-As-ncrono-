@@ -100,6 +100,8 @@ public final class VipsViewPreparer {
                 inputWithOptions,
                 output.toString(),
                 matrix,
+                "--interpolate=" + (stablePlan.scaleX() > 1.0
+                        || stablePlan.scaleY() > 1.0 ? "bicubic" : "bilinear"),
                 "--idx=" + (-decoderX),
                 "--idy=" + (-decoderY),
                 "--oarea=0 0 " + chunkPlan.renderedWidth()

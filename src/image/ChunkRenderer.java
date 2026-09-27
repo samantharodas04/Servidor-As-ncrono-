@@ -7,5 +7,5 @@ import java.nio.file.Path;
 
 /** Convierte una instruccion geometrica en bytes JPEG. */
 public interface ChunkRenderer {
-    byte[] render(Path source, PlannedChunk chunk) throws IOException;
+    byte[] render(Path source, PlannedChunk chunk, int jpegQuality) throws IOException;
 }

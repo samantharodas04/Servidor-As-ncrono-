@@ -93,7 +93,8 @@ public final class ViewProcessor implements AutoCloseable {
                 ensureNotCancelled();
                 long chunksStartedAt = System.nanoTime();
                 generated = workers.renderAll(
-                        preparedView.path(), generationPlan.chunkPlan()
+                        preparedView.path(), generationPlan.chunkPlan(),
+                        zoomLevel.scale() > 1.0 ? 92 : 85
                 );
                 chunkNanos = System.nanoTime() - chunksStartedAt;
                 chunkMillis = chunkNanos / 1_000_000L;

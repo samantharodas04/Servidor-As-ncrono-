@@ -37,6 +37,16 @@ Después decodifica los JPEG y los dibuja en un canvas en las posiciones de
 cada chunk. El navegador usa dos carriles de decodificación y una caché
 GreedyDual-Size de bitmaps limitada a 12 MiB. Los bitmaps expulsados se cierran;
 los chunks de vistas descartadas no se decodifican si siguen pendientes.
+
+Las imágenes con al menos 50 000 píxeles en algún lado permiten dos pasos
+adicionales de ampliación visual, 2× y 4×; Las Meninas termina en 1:1.
+Esos pasos agrandan los píxeles originales y no añaden detalle nuevo.
+En 2× y 4× se usa interpolación bicúbica y JPEG de calidad 92 para suavizar
+los bordes; los demás niveles conservan la interpolación bilineal y calidad 85.
+Para ocultar esos dos niveles extra en el visor, cambiar
+`ENABLE_EXTRA_GIANT_ZOOM` a `false` al inicio de `web/app.js` y recargar la
+página. El servidor sigue aceptando los niveles por protocolo; el flag controla
+la navegación del navegador.
 Actualmente el servidor envía todos los chunks de cada vista, aunque el
 navegador pueda reutilizar un bitmap para evitar volver a decodificarlo.
 
@@ -103,6 +113,5 @@ binarios PAI se encuentra en [docs/README.md](docs/README.md).
 ## Próximo hito
 
 Medir la memoria y los aciertos de caché con un recorrido repetible en Firefox.
-Después podrán abordarse la miniatura de posición y la navegación
-más allá de la escala nativa. El navegador todavía reconstruye cada vista
+Después podrá abordarse la miniatura de posición. El navegador todavía reconstruye cada vista
 completa en el canvas y no evita que el servidor reenvíe los JPEG cacheados.

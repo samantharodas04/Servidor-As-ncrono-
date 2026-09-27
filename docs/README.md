@@ -172,6 +172,20 @@ centro + viewport + zoom
 en una región visible y un conjunto estable de chunks anclados a una cuadrícula
 global.
 
+El zoom parte del ajuste a la ventana y llega a 1:1. Si la imagen mide al menos
+50 000 píxeles en algún lado, agrega dos niveles de ampliación visual, 2× y
+4×. Con la ampliación activada, el navegador y el servidor calculan los
+mismos `zoomIndex`. Las Meninas conserva su máximo de 1:1. Por encima de 1:1 los
+píxeles se agrandan, sin crear detalle nuevo ni derivados adicionales.
+En esos dos niveles la preparación usa interpolación bicúbica y los chunks
+se comprimen como JPEG de calidad 92. Los niveles hasta 1:1 conservan
+interpolación bilineal y JPEG de calidad 85. La mejora es visual y aumenta
+los bytes enviados por vista; no aumenta la resolución del original.
+El flag `ENABLE_EXTRA_GIANT_ZOOM` al inicio de `web/app.js` permite ocultar
+los niveles 2× y 4× del visor: `true` los muestra, `false` detiene el control
+de zoom en 1:1 tras recargar la página. No cambia los niveles aceptados por
+el servidor si un cliente PAI/1 los solicita directamente.
+
 ### Paso 4: procesar solamente la región necesaria
 
 `VipsViewPreparer` usa libvips para preparar temporalmente la región requerida.

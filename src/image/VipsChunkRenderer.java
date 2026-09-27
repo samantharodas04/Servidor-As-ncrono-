@@ -12,10 +12,11 @@ import java.util.concurrent.TimeUnit;
 public final class VipsChunkRenderer implements ChunkRenderer {
     private static final long TIMEOUT_SECONDS = 15;
     private static final long MAX_JPEG_BYTES = 8L * 1024L * 1024L;
-    private static final int JPEG_QUALITY = 85;
-
     @Override
-    public byte[] render(Path source, PlannedChunk chunk) throws IOException {
+    public byte[] render(Path source, PlannedChunk chunk, int jpegQuality) throws IOException {
+        if (jpegQuality < 1 || jpegQuality > 100) {
+            throw new IllegalArgumentException("Calidad JPEG fuera de rango");
+        }
         Path normalizedSource = source.toAbsolutePath().normalize();
         if (!Files.isRegularFile(normalizedSource)) {
             throw new IOException("La vista preparada no existe");
@@ -23,7 +24,7 @@ public final class VipsChunkRenderer implements ChunkRenderer {
 
         Path temporaryJpeg = Files.createTempFile("image-chunk-", ".jpg");
         try {
-            runVips(normalizedSource, temporaryJpeg, chunk);
+            runVips(normalizedSource, temporaryJpeg, chunk, jpegQuality);
 
             long jpegSize = Files.size(temporaryJpeg);
             if (jpegSize <= 0 || jpegSize > MAX_JPEG_BYTES) {
@@ -38,8 +39,9 @@ public final class VipsChunkRenderer implements ChunkRenderer {
         }
     }
 
-    private void runVips(Path source, Path output, PlannedChunk chunk) throws IOException {
-        String outputWithOptions = output + "[Q=" + JPEG_QUALITY + ",optimize-coding]";
+    private void runVips(Path source, Path output, PlannedChunk chunk, int jpegQuality)
+            throws IOException {
+        String outputWithOptions = output + "[Q=" + jpegQuality + ",optimize-coding]";
         Process process = new ProcessBuilder(
                 "vips",
                 "crop",

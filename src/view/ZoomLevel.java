@@ -13,8 +13,8 @@ public record ZoomLevel(
         if (index < 0) {
             throw new IllegalArgumentException("El indice no puede ser negativo");
         }
-        if (!(scale > 0.0 && scale <= 1.0)) {
-            throw new IllegalArgumentException("La escala debe estar entre 0 y 1");
+        if (!(scale > 0.0 && scale <= 4.0)) {
+            throw new IllegalArgumentException("La escala debe estar entre 0 y 4");
         }
         if (sourceViewWidth <= 0 || sourceViewHeight <= 0) {
             throw new IllegalArgumentException("La region visible debe tener dimensiones positivas");

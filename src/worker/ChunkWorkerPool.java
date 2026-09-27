@@ -34,7 +34,7 @@ public final class ChunkWorkerPool implements AutoCloseable {
         });
     }
 
-    public List<RenderedChunk> renderAll(Path preparedView, ViewChunkPlan plan)
+    public List<RenderedChunk> renderAll(Path preparedView, ViewChunkPlan plan, int jpegQuality)
             throws IOException {
         List<Future<RenderedChunk>> pending = new ArrayList<>(plan.chunks().size());
         for (PlannedChunk originalChunk : plan.chunks()) {
@@ -45,7 +45,7 @@ public final class ChunkWorkerPool implements AutoCloseable {
                         originalChunk.column(), originalChunk.row()
                 );
                 PlannedChunk localChunk = toPreparedViewChunk(originalChunk, plan);
-                byte[] jpeg = renderer.render(preparedView, localChunk);
+                byte[] jpeg = renderer.render(preparedView, localChunk, jpegQuality);
                 return new RenderedChunk(originalChunk, jpeg);
             }));
         }

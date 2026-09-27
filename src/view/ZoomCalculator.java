@@ -6,6 +6,8 @@ import java.util.List;
 /** Calcula niveles de zoom; no crea imagenes, capas ni archivos. */
 public final class ZoomCalculator {
     private static final double NATIVE_SCALE = 1.0;
+    private static final double GIANT_MAX_SCALE = 4.0;
+    private static final int GIANT_MIN_EDGE = 50_000;
     private static final double EPSILON = 1.0e-12;
     private static final int MAX_LEVELS = 64;
 
@@ -26,6 +28,8 @@ public final class ZoomCalculator {
         double fitWidth = (double) viewportWidth / imageWidth;
         double fitHeight = (double) viewportHeight / imageHeight;
         double baseScale = Math.min(NATIVE_SCALE, Math.min(fitWidth, fitHeight));
+        double maximumScale = Math.max(imageWidth, imageHeight) >= GIANT_MIN_EDGE
+                ? GIANT_MAX_SCALE : NATIVE_SCALE;
 
         List<ZoomLevel> levels = new ArrayList<>();
         double scale = baseScale;
@@ -34,11 +38,13 @@ public final class ZoomCalculator {
             levels.add(createLevel(index, scale, imageWidth, imageHeight,
                     viewportWidth, viewportHeight));
 
-            if (scale >= NATIVE_SCALE - EPSILON) {
+            if (scale >= maximumScale - EPSILON) {
                 return List.copyOf(levels);
             }
 
-            scale = Math.min(NATIVE_SCALE, scale * 2.0);
+            scale = scale < NATIVE_SCALE - EPSILON
+                    ? Math.min(NATIVE_SCALE, scale * 2.0)
+                    : Math.min(maximumScale, scale * 2.0);
         }
 
         throw new IllegalStateException("Se excedio el maximo de niveles de zoom");
