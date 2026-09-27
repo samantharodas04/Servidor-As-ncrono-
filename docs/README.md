@@ -127,7 +127,7 @@ El flujo es:
 ```text
 1. El navegador abre una conexión al servidor.
 2. Solicita GET / mediante HTTP.
-3. Java entrega index.html, app.js y style.css.
+3. Java entrega index.html, style.css y los módulos JavaScript del visor.
 4. app.js solicita GET /pai con Upgrade: websocket.
 5. El servidor responde 101 Switching Protocols.
 6. La misma conexión TCP queda funcionando como WebSocket.
@@ -591,7 +591,11 @@ src/view/ViewProcessor.java           procesamiento completo de la vista
 src/view/ChunkPlanner.java            geometría estable de chunks
 src/cache/ChunkCache.java             caché GreedyDual-Size de JPEG
 src/worker/ChunkWorkerPool.java       workers limitados
-web/app.js                            codec y estado del navegador
+web/index.html                        estructura de la página
+web/app.js                            conexión, estado y dibujo del visor
+web/protocol.js                       codec PAI/1 del navegador
+web/navigation.js                     niveles de zoom y centro visible
+web/minimap.js                        dibujo e interacción de la miniatura
 web/bitmap-cache.js                   caché GreedyDual-Size de bitmaps
 ```
 

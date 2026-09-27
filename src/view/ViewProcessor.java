@@ -41,6 +41,7 @@ public final class ViewProcessor implements AutoCloseable {
     }
 
     public ViewResult render(ViewRequest request) throws IOException {
+        // Planifica la región y consulta la caché antes de preparar el original.
         long startedAt = System.nanoTime();
         ImageSource source = findSource(request.imageId());
         ensureSourceUnchanged(source);
@@ -72,6 +73,7 @@ public final class ViewProcessor implements AutoCloseable {
         long preparationMillis = 0;
         long chunkMillis = 0;
         if (!missing.isEmpty()) {
+            // Libvips y los workers generan únicamente los chunks faltantes.
             ensureNotCancelled();
             StableChunkPlan generationPlan = ChunkPreparationPlanner.forMissingChunks(
                     stablePlan, missing

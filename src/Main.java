@@ -17,8 +17,11 @@ public final class Main {
     }
 
     public static void main(String[] args) throws IOException {
+        // 1. Lee el puerto y descubre los originales disponibles.
         int port = readPort(args);
         List<ImageSource> images = new ImageCatalog(ORIGINALS_ROOT).discover();
+
+        // 2. Crea el servidor; cada cliente tendrá su propio coordinador de vistas.
         AsyncHttpServer server = new AsyncHttpServer(port, WEB_ROOT, images);
         CountDownLatch stopped = new CountDownLatch(1);
 
@@ -27,6 +30,7 @@ public final class Main {
             stopped.countDown();
         }, "server-shutdown"));
 
+        // 3. Atiende HTTP y WebSocket hasta recibir la señal de cierre.
         server.start();
         System.out.println("Servidor HTTP/WebSocket iniciado");
         System.out.println("Pagina: http://localhost:" + port + "/");

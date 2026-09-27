@@ -103,6 +103,14 @@ src/server/   servidor HTTP/WebSocket y lectura de frames
 web/          cliente PAI/1, caché de bitmaps y visor adaptable
 ```
 
+Para seguir el código: `src/Main.java` descubre las imágenes e inicia
+`AsyncHttpServer`; `/pai` entrega cada `VIEW` a `ViewCoordinator`, que llama
+a `ViewProcessor`. En el navegador, `web/app.js` coordina la conexión y el
+canvas; `web/protocol.js` lee y escribe PAI/1; `web/navigation.js` calcula zoom
+y centro; `web/minimap.js` controla la miniatura; `web/bitmap-cache.js` guarda
+los bitmaps reutilizables. `web/index.html` contiene únicamente la estructura
+de la página y carga `app.js` como módulo.
+
 Los originales se colocan en `images/originals`. `images/processed` no se usa
 para construir una pirámide persistente. Los derivados tienen el ID, tamaño y
 fecha del original en su nombre; una nueva versión no reutiliza archivos viejos.

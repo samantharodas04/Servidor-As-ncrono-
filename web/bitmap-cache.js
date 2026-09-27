@@ -1,7 +1,7 @@
 "use strict";
 
 /** Caché GreedyDual-Size de bitmaps decodificados, limitada por bytes estimados. */
-window.BitmapCache = class BitmapCache {
+export class BitmapCache {
     constructor(maximumBytes) {
         if (!Number.isSafeInteger(maximumBytes) || maximumBytes <= 0) {
             throw new Error("El límite de caché debe ser positivo");
@@ -77,4 +77,4 @@ window.BitmapCache = class BitmapCache {
     get size() {
         return this.entries.size;
     }
-};
+}

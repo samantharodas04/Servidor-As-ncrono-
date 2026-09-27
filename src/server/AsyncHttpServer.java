@@ -136,6 +136,7 @@ public final class AsyncHttpServer implements AutoCloseable {
         });
     }
 
+    // 4. HTTP entrega web/*; /pai convierte la conexión en WebSocket.
     private void handleHttpRequest(AsynchronousSocketChannel client, String raw) {
         try {
             String[] lines = raw.split("\r\n");
@@ -263,6 +264,7 @@ public final class AsyncHttpServer implements AutoCloseable {
     }
 
     /** Devuelve false cuando el frame cierra o invalida esta conexion. */
+    // 5. Decodifica LIST_IMAGES o VIEW y envía la vista al coordinador del cliente.
     private boolean handleWebSocketFrame(
             AsynchronousSocketChannel client,
             WebSocketUtil.DecodedFrame frame
@@ -321,6 +323,7 @@ public final class AsyncHttpServer implements AutoCloseable {
         return session;
     }
 
+    // 7. Envía START, cada JPEG y END solo si la generación sigue vigente.
     private void sendViewResult(ClientSession session, ViewResult result) {
         long generationId = result.request().generationId();
         if (sessions.get(session.client) != session

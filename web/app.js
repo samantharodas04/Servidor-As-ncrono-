@@ -1,37 +1,16 @@
 "use strict";
 
+import {PaiOpcode, encodeListImages, encodeView, readPaiOpcode,
+    decodeImageList, decodeViewStart, decodeChunk, decodeViewEnd} from "./protocol.js";
+import {zoomScales as calculateZoomScales, initialView as createInitialView,
+    clampVisibleCenter} from "./navigation.js";
+import {BitmapCache} from "./bitmap-cache.js";
+import {createMinimap} from "./minimap.js";
+
 // Cambiar a false y recargar la página para detener el zoom gigante en 1:1.
 const ENABLE_EXTRA_GIANT_ZOOM = true;
 
-// Paso 1
-const PaiProtocol = Object.freeze({
-    NAME: "PAI",
-    VERSION: 1
-});
-
-const PaiOpcode = Object.freeze({
-    VIEW: 1,
-    LIST_IMAGES: 2,
-    IMAGE_LIST: 3,
-    VIEW_START: 4,
-    CHUNK: 5,
-    VIEW_END: 6
-});
-
-const PaiLimits = Object.freeze({
-    MAX_IMAGES: 1024,
-    MAX_CHUNKS_PER_VIEW: 4096,
-    MAX_JPEG_BYTES: 8 * 1024 * 1024
-});
-
-const PAI_MAGIC = new TextEncoder().encode(PaiProtocol.NAME);
-const PAI_HEADER_BYTES = PAI_MAGIC.length + 2;
-const VIEW_BODY_BYTES = 8 + (5 * 4) + 2;
-const VIEW_START_BYTES = PAI_HEADER_BYTES + 8 + (8 * 4);
-const CHUNK_METADATA_BYTES = PAI_HEADER_BYTES + 8 + (8 * 4);
-const VIEW_END_BYTES = PAI_HEADER_BYTES + 8 + 4 + 8;
-
-// Paso 2
+// 8. El visor conserva el catálogo, la solicitud vigente y los bitmaps reutilizables.
 const statusElement = document.getElementById("connectionStatus");
 const viewStatusElement = document.getElementById("viewStatus");
 const sendValidButton = document.getElementById("sendValidView");
@@ -49,9 +28,8 @@ const canvasContext = imageCanvas.getContext("2d");
 const overviewPanel = document.getElementById("overviewPanel");
 const overviewFrame = document.getElementById("overviewFrame");
 const overviewCanvas = document.getElementById("overviewCanvas");
-const overviewContext = overviewCanvas.getContext("2d");
 const overviewMarker = document.getElementById("overviewMarker");
-const bitmapCache = new window.BitmapCache(12 * 1024 * 1024);
+const bitmapCache = new BitmapCache(12 * 1024 * 1024);
 
 const scheme = window.location.protocol === "https:" ? "wss" : "ws";
 const socket = new WebSocket(`${scheme}://${window.location.host}/pai`);
@@ -64,250 +42,6 @@ let activeView = null;
 let currentRequest = null;
 let dragStart = null;
 let wheelTimer = null;
-let overviewGeometry = null;
-let overviewDrag = null;
-
-// Paso 3
-function createPaiMessage(opcode, payloadBytes = 0) {
-    const buffer = new ArrayBuffer(PAI_HEADER_BYTES + payloadBytes);
-    const bytes = new Uint8Array(buffer);
-    const view = new DataView(buffer);
-
-    bytes.set(PAI_MAGIC, 0);
-    view.setUint8(PAI_MAGIC.length, PaiProtocol.VERSION);
-    view.setUint8(PAI_MAGIC.length + 1, opcode);
-
-    return {buffer, view, offset: PAI_HEADER_BYTES};
-}
-
-function readPaiOpcode(buffer, minimumPayloadBytes = 0) {
-    const view = new DataView(buffer);
-    if (view.byteLength < PAI_HEADER_BYTES + minimumPayloadBytes) {
-        throw new Error("Mensaje PAI incompleto");
-    }
-
-    for (let index = 0; index < PAI_MAGIC.length; index++) {
-        if (view.getUint8(index) !== PAI_MAGIC[index]) {
-            throw new Error("Firma PAI invalida");
-        }
-    }
-    if (view.getUint8(PAI_MAGIC.length) !== PaiProtocol.VERSION) {
-        throw new Error("Version PAI no soportada");
-    }
-    return view.getUint8(PAI_MAGIC.length + 1);
-}
-
-function requirePaiMessage(buffer, expectedOpcode, minimumPayloadBytes = 0) {
-    const opcode = readPaiOpcode(buffer, minimumPayloadBytes);
-    if (opcode !== expectedOpcode) {
-        throw new Error("Operacion PAI inesperada");
-    }
-    return new DataView(buffer);
-}
-
-// Paso 4
-function encodeListImages() {
-    return createPaiMessage(PaiOpcode.LIST_IMAGES).buffer;
-}
-
-function readText(view, state) {
-    if (state.offset + 2 > view.byteLength) {
-        throw new Error("IMAGE_LIST incompleto");
-    }
-    const length = view.getUint16(state.offset);
-    state.offset += 2;
-    if (length < 1 || state.offset + length > view.byteLength) {
-        throw new Error("Texto invalido en IMAGE_LIST");
-    }
-
-    const bytes = new Uint8Array(view.buffer, state.offset, length);
-    state.offset += length;
-    return new TextDecoder("utf-8", {fatal: true}).decode(bytes);
-}
-
-function decodeImageList(buffer) {
-    const view = requirePaiMessage(buffer, PaiOpcode.IMAGE_LIST, 2);
-    const count = view.getUint16(PAI_HEADER_BYTES);
-    if (count > PaiLimits.MAX_IMAGES) {
-        throw new Error("IMAGE_LIST excede el maximo de imagenes");
-    }
-
-    const state = {offset: PAI_HEADER_BYTES + 2};
-    const images = [];
-    for (let index = 0; index < count; index++) {
-        const id = readText(view, state);
-        const name = readText(view, state);
-        if (state.offset + 16 > view.byteLength) {
-            throw new Error("Metadatos incompletos en IMAGE_LIST");
-        }
-
-        const width = view.getUint32(state.offset);
-        state.offset += 4;
-        const height = view.getUint32(state.offset);
-        state.offset += 4;
-        const sizeBytes = Number(view.getBigUint64(state.offset));
-        state.offset += 8;
-        if (width < 1 || height < 1 || !Number.isSafeInteger(sizeBytes)) {
-            throw new Error("Metadatos invalidos en IMAGE_LIST");
-        }
-        images.push({id, name, width, height, sizeBytes});
-    }
-
-    if (state.offset !== view.byteLength) {
-        throw new Error("IMAGE_LIST contiene bytes adicionales");
-    }
-    return images;
-}
-
-function decodeViewStart(buffer) {
-    const view = requirePaiMessage(buffer, PaiOpcode.VIEW_START);
-    if (view.byteLength !== VIEW_START_BYTES) {
-        throw new Error("VIEW_START tiene una longitud invalida");
-    }
-
-    let offset = PAI_HEADER_BYTES;
-    const generationId = view.getBigUint64(offset);
-    offset += 8;
-    const viewportWidth = view.getUint32(offset);
-    offset += 4;
-    const viewportHeight = view.getUint32(offset);
-    offset += 4;
-    const zoomIndex = view.getUint32(offset);
-    offset += 4;
-    const regionX = view.getUint32(offset);
-    offset += 4;
-    const regionY = view.getUint32(offset);
-    offset += 4;
-    const regionWidth = view.getUint32(offset);
-    offset += 4;
-    const regionHeight = view.getUint32(offset);
-    offset += 4;
-    const chunkCount = view.getUint32(offset);
-
-    if (generationId < 1n || viewportWidth < 1 || viewportHeight < 1
-            || regionWidth < 1 || regionHeight < 1
-            || chunkCount < 1 || chunkCount > PaiLimits.MAX_CHUNKS_PER_VIEW) {
-        throw new Error("VIEW_START contiene valores invalidos");
-    }
-    return {
-        generationId,
-        viewportWidth,
-        viewportHeight,
-        zoomIndex,
-        regionX,
-        regionY,
-        regionWidth,
-        regionHeight,
-        chunkCount
-    };
-}
-
-function decodeChunk(buffer) {
-    const view = requirePaiMessage(buffer, PaiOpcode.CHUNK);
-    if (view.byteLength < CHUNK_METADATA_BYTES) {
-        throw new Error("CHUNK incompleto");
-    }
-
-    let offset = PAI_HEADER_BYTES;
-    const generationId = view.getBigUint64(offset);
-    offset += 8;
-    const index = view.getUint32(offset);
-    offset += 4;
-    const column = view.getUint32(offset);
-    offset += 4;
-    const row = view.getUint32(offset);
-    offset += 4;
-    const canvasX = view.getInt32(offset);
-    offset += 4;
-    const canvasY = view.getInt32(offset);
-    offset += 4;
-    const width = view.getUint32(offset);
-    offset += 4;
-    const height = view.getUint32(offset);
-    offset += 4;
-    const jpegBytes = view.getUint32(offset);
-    offset += 4;
-
-    if (generationId < 1n || width < 1 || height < 1 || jpegBytes < 4
-            || jpegBytes > PaiLimits.MAX_JPEG_BYTES
-            || offset + jpegBytes !== view.byteLength) {
-        throw new Error("CHUNK contiene valores invalidos");
-    }
-    const jpeg = new Uint8Array(buffer, offset, jpegBytes);
-    if (jpeg[0] !== 0xff || jpeg[1] !== 0xd8
-            || jpeg[jpeg.length - 2] !== 0xff || jpeg[jpeg.length - 1] !== 0xd9) {
-        throw new Error("CHUNK no contiene un JPEG valido");
-    }
-    return {generationId, index, column, row, canvasX, canvasY, width, height, jpegBytes, jpeg};
-}
-
-function decodeViewEnd(buffer) {
-    const view = requirePaiMessage(buffer, PaiOpcode.VIEW_END);
-    if (view.byteLength !== VIEW_END_BYTES) {
-        throw new Error("VIEW_END tiene una longitud invalida");
-    }
-    return {
-        generationId: view.getBigUint64(PAI_HEADER_BYTES),
-        chunkCount: view.getUint32(PAI_HEADER_BYTES + 8),
-        totalJpegBytes: view.getBigUint64(PAI_HEADER_BYTES + 12)
-    };
-}
-
-// Paso 5
-function encodeView(request) {
-    const imageId = new TextEncoder().encode(request.imageId);
-    const message = createPaiMessage(
-        PaiOpcode.VIEW,
-        VIEW_BODY_BYTES + imageId.length
-    );
-    const {buffer, view} = message;
-    let {offset} = message;
-
-    view.setBigUint64(offset, request.generationId);
-    offset += 8;
-    view.setInt32(offset, request.zoomIndex);
-    offset += 4;
-    view.setInt32(offset, request.centerX);
-    offset += 4;
-    view.setInt32(offset, request.centerY);
-    offset += 4;
-    view.setInt32(offset, request.viewportWidth);
-    offset += 4;
-    view.setInt32(offset, request.viewportHeight);
-    offset += 4;
-    view.setUint16(offset, imageId.length);
-    offset += 2;
-    new Uint8Array(buffer, offset).set(imageId);
-    return buffer;
-}
-
-function zoomScales(image) {
-    const base = Math.min(1, imageCanvas.width / image.width,
-        imageCanvas.height / image.height);
-    const maximum = ENABLE_EXTRA_GIANT_ZOOM
-        && Math.max(image.width, image.height) >= 50000 ? 4 : 1;
-    const scales = [];
-    let scale = base;
-    for (let index = 0; index < 64; index++) {
-        scales.push(scale);
-        if (scale >= maximum - 1e-12) break;
-        scale = scale < 1 - 1e-12
-            ? Math.min(1, scale * 2)
-            : Math.min(maximum, scale * 2);
-    }
-    return scales;
-}
-
-function initialView(image) {
-    return {
-        imageId: image.id,
-        zoomIndex: 0,
-        centerX: Math.floor(image.width / 2),
-        centerY: Math.floor(image.height / 2),
-        viewportWidth: imageCanvas.width,
-        viewportHeight: imageCanvas.height
-    };
-}
 
 function updateNavigation() {
     const image = catalog.get(imageSelect.value);
@@ -323,6 +57,7 @@ function updateNavigation() {
 }
 
 function requestView(view) {
+    // Cada acción de navegación invalida la generación anterior.
     if (!requireOpenSocket()) return;
     const request = {...view, generationId: generationId++};
     currentRequest = request;
@@ -359,14 +94,31 @@ function moveView(deltaCanvasX, deltaCanvasY) {
     }
 }
 
-function clampVisibleCenter(center, imageSize, visibleSize) {
-    if (visibleSize >= imageSize) return Math.floor(imageSize / 2);
-    const half = visibleSize / 2;
-    return Math.max(0, Math.min(imageSize - 1,
-        Math.round(Math.max(half, Math.min(imageSize - half, center)))));
+// El controlador de miniatura lee el estado actual, sin duplicar solicitudes ni catálogo.
+const minimap = createMinimap({
+    panel: overviewPanel,
+    frame: overviewFrame,
+    canvas: overviewCanvas,
+    marker: overviewMarker,
+    imageCanvas,
+    getImage: (id) => catalog.get(id),
+    getRequest: () => currentRequest,
+    getActiveView: () => activeView,
+    socketReady: () => socket.readyState === WebSocket.OPEN,
+    zoomScales,
+    requestView,
+    moveView
+});
+
+function zoomScales(image) {
+    return calculateZoomScales(image, imageCanvas.width, imageCanvas.height,
+        ENABLE_EXTRA_GIANT_ZOOM);
 }
 
-// Paso 6
+function initialView(image) {
+    return createInitialView(image, imageCanvas.width, imageCanvas.height);
+}
+
 function formatBytes(bytes) {
     const units = ["B", "KiB", "MiB", "GiB"];
     let value = bytes;
@@ -401,105 +153,8 @@ function updateCacheStatus() {
         + `${bitmapCache.hits} reutilizadas`;
 }
 
-function clearOverview() {
-    overviewContext.clearRect(0, 0, overviewCanvas.width, overviewCanvas.height);
-    overviewGeometry = null;
-    overviewDrag = null;
-    overviewFrame.classList.remove("dragging");
-    overviewPanel.hidden = true;
-}
-
-function captureOverview(view) {
-    if (view.zoomIndex !== 0) return;
-    const image = catalog.get(view.imageId);
-    if (!image) return;
-
-    const scale = zoomScales(image)[0];
-    const sourceWidth = Math.min(imageCanvas.width, Math.max(1,
-        Math.round(image.width * scale)));
-    const sourceHeight = Math.min(imageCanvas.height, Math.max(1,
-        Math.round(image.height * scale)));
-    const sourceX = Math.floor((imageCanvas.width - sourceWidth) / 2);
-    const sourceY = Math.floor((imageCanvas.height - sourceHeight) / 2);
-    const overviewScale = Math.min(overviewCanvas.width / image.width,
-        overviewCanvas.height / image.height);
-    const width = image.width * overviewScale;
-    const height = image.height * overviewScale;
-    const x = (overviewCanvas.width - width) / 2;
-    const y = (overviewCanvas.height - height) / 2;
-
-    overviewContext.clearRect(0, 0, overviewCanvas.width, overviewCanvas.height);
-    overviewContext.drawImage(imageCanvas,
-        sourceX, sourceY, sourceWidth, sourceHeight, x, y, width, height);
-    overviewGeometry = {imageId: image.id, x, y, width, height};
-    overviewPanel.hidden = false;
-    updateOverviewMarker(view);
-}
-
-function updateOverviewMarker(view) {
-    if (!overviewGeometry || overviewGeometry.imageId !== view.imageId) return;
-    const image = catalog.get(view.imageId);
-    if (!image || view.regionX + view.regionWidth > image.width
-            || view.regionY + view.regionHeight > image.height) return;
-
-    const rawX = overviewGeometry.x + overviewGeometry.width * view.regionX / image.width;
-    const rawY = overviewGeometry.y + overviewGeometry.height * view.regionY / image.height;
-    const rawWidth = overviewGeometry.width * view.regionWidth / image.width;
-    const rawHeight = overviewGeometry.height * view.regionHeight / image.height;
-    const width = Math.max(8, rawWidth);
-    const height = Math.max(8, rawHeight);
-    const x = Math.max(0, Math.min(overviewCanvas.width - width,
-        rawX + (rawWidth - width) / 2));
-    const y = Math.max(0, Math.min(overviewCanvas.height - height,
-        rawY + (rawHeight - height) / 2));
-
-    overviewMarker.style.left = `${x / overviewCanvas.width * 100}%`;
-    overviewMarker.style.top = `${y / overviewCanvas.height * 100}%`;
-    overviewMarker.style.width = `${width / overviewCanvas.width * 100}%`;
-    overviewMarker.style.height = `${height / overviewCanvas.height * 100}%`;
-}
-
-function overviewTarget(event) {
-    if (!currentRequest || currentRequest.zoomIndex === 0
-            || socket.readyState !== WebSocket.OPEN
-            || !activeView || activeView.generationId !== currentRequest.generationId
-            || !overviewGeometry || overviewGeometry.imageId !== currentRequest.imageId) {
-        return null;
-    }
-    const image = catalog.get(currentRequest.imageId);
-    if (!image) return null;
-
-    const bounds = overviewCanvas.getBoundingClientRect();
-    const canvasX = (event.clientX - bounds.left) * overviewCanvas.width / bounds.width;
-    const canvasY = (event.clientY - bounds.top) * overviewCanvas.height / bounds.height;
-    const sourceX = Math.round(Math.max(0, Math.min(image.width - 1,
-        (canvasX - overviewGeometry.x) * image.width / overviewGeometry.width)));
-    const sourceY = Math.round(Math.max(0, Math.min(image.height - 1,
-        (canvasY - overviewGeometry.y) * image.height / overviewGeometry.height)));
-    const scale = zoomScales(image)[currentRequest.zoomIndex];
-    const scaleX = Math.max(1, Math.round(image.width * scale)) / image.width;
-    const scaleY = Math.max(1, Math.round(image.height * scale)) / image.height;
-    return {
-        centerX: clampVisibleCenter(sourceX, image.width, imageCanvas.width / scaleX),
-        centerY: clampVisibleCenter(sourceY, image.height, imageCanvas.height / scaleY)
-    };
-}
-
-function previewOverviewTarget(target) {
-    const image = catalog.get(currentRequest.imageId);
-    const regionWidth = activeView.regionWidth;
-    const regionHeight = activeView.regionHeight;
-    updateOverviewMarker({
-        ...activeView,
-        regionX: Math.max(0, Math.min(image.width - regionWidth,
-            Math.round(target.centerX - regionWidth / 2))),
-        regionY: Math.max(0, Math.min(image.height - regionHeight,
-            Math.round(target.centerY - regionHeight / 2)))
-    });
-}
-
 function showCatalog(images) {
-    clearOverview();
+    minimap.clear();
     bitmapCache.clear();
     updateCacheStatus();
     catalog.clear();
@@ -529,6 +184,7 @@ function requireOpenSocket() {
 }
 
 function receiveViewStart(buffer) {
+    // 9. START abre la vista; los CHUNK se dibujan en dos carriles de decodificación.
     const message = decodeViewStart(buffer);
     if (message.generationId !== latestRequestedGenerationId) return;
 
@@ -544,7 +200,7 @@ function receiveViewStart(buffer) {
         nextDrawLane: 0,
         drawError: null
     };
-    updateOverviewMarker(activeView);
+    minimap.updateMarker(activeView);
     viewStatusElement.textContent =
         `VIEW ${message.generationId}: esperando ${message.chunkCount} chunks`;
 }
@@ -607,6 +263,7 @@ function receiveChunk(buffer) {
 }
 
 async function receiveViewEnd(buffer) {
+    // 10. END confirma cantidad y bytes antes de declarar completa la vista.
     const message = decodeViewEnd(buffer);
     if (!activeView || message.generationId !== activeView.generationId) return;
     const view = activeView;
@@ -619,13 +276,13 @@ async function receiveViewEnd(buffer) {
     await Promise.all(view.drawLanes);
     if (activeView !== view) return;
     if (view.drawError) throw view.drawError;
-    captureOverview(view);
+    minimap.capture(view);
     viewStatusElement.textContent =
         `VIEW ${message.generationId} completa: ${message.chunkCount} chunks, `
         + formatBytes(Number(message.totalJpegBytes));
 }
 
-// Paso 7
+// 11. El WebSocket distribuye respuestas PAI al catálogo o a la vista activa.
 socket.addEventListener("open", () => {
     statusElement.textContent = "Conectado: handshake completado";
     statusElement.parentElement.dataset.state = "connected";
@@ -667,7 +324,7 @@ socket.addEventListener("message", async (event) => {
 
 socket.addEventListener("close", () => {
     activeView = null;
-    clearOverview();
+    minimap.clear();
     bitmapCache.clear();
     updateCacheStatus();
     statusElement.textContent = "Desconectado";
@@ -683,7 +340,7 @@ socket.addEventListener("error", () => {
     statusElement.parentElement.dataset.state = "error";
 });
 
-// Paso 8
+// 12. Los controles traducen acciones del usuario en nuevas solicitudes VIEW.
 imageSelect.addEventListener("change", () => {
     if (wheelTimer !== null) clearTimeout(wheelTimer);
     wheelTimer = null;
@@ -692,7 +349,7 @@ imageSelect.addEventListener("change", () => {
     activeView = null;
     latestRequestedGenerationId = 0n;
     canvasContext.clearRect(0, 0, imageCanvas.width, imageCanvas.height);
-    clearOverview();
+    minimap.clear();
     showSelectedImage();
     const image = catalog.get(imageSelect.value);
     if (wasViewing && image) requestView(initialView(image));
@@ -705,60 +362,6 @@ sendValidButton.addEventListener("click", () => {
 
 zoomOutButton.addEventListener("click", () => changeZoom(-1));
 zoomInButton.addEventListener("click", () => changeZoom(1));
-
-overviewFrame.addEventListener("pointerdown", (event) => {
-    if (event.button !== 0) return;
-    const target = overviewTarget(event);
-    if (!target) return;
-    event.preventDefault();
-    overviewFrame.focus();
-    overviewDrag = {pointerId: event.pointerId, generationId: currentRequest.generationId};
-    overviewFrame.setPointerCapture(event.pointerId);
-    overviewFrame.classList.add("dragging");
-    previewOverviewTarget(target);
-});
-
-overviewFrame.addEventListener("pointermove", (event) => {
-    if (!overviewDrag || overviewDrag.pointerId !== event.pointerId
-            || overviewDrag.generationId !== currentRequest?.generationId) return;
-    const target = overviewTarget(event);
-    if (target) previewOverviewTarget(target);
-});
-
-overviewFrame.addEventListener("pointerup", (event) => {
-    if (!overviewDrag || overviewDrag.pointerId !== event.pointerId) return;
-    const generationId = overviewDrag.generationId;
-    overviewDrag = null;
-    overviewFrame.classList.remove("dragging");
-    if (generationId !== currentRequest?.generationId) return;
-    const target = overviewTarget(event);
-    if (target && (target.centerX !== currentRequest.centerX
-            || target.centerY !== currentRequest.centerY)) {
-        requestView({...currentRequest, ...target});
-    } else if (activeView) {
-        updateOverviewMarker(activeView);
-    }
-});
-
-overviewFrame.addEventListener("pointercancel", () => {
-    overviewDrag = null;
-    overviewFrame.classList.remove("dragging");
-    if (activeView) updateOverviewMarker(activeView);
-});
-
-overviewFrame.addEventListener("keydown", (event) => {
-    const horizontal = imageCanvas.width / 4;
-    const vertical = imageCanvas.height / 4;
-    const movement = {
-        ArrowLeft: [horizontal, 0],
-        ArrowRight: [-horizontal, 0],
-        ArrowUp: [0, vertical],
-        ArrowDown: [0, -vertical]
-    }[event.key];
-    if (!movement || !currentRequest || currentRequest.zoomIndex === 0) return;
-    event.preventDefault();
-    moveView(...movement);
-});
 
 imageCanvas.addEventListener("wheel", (event) => {
     if (!currentRequest || socket.readyState !== WebSocket.OPEN) return;
