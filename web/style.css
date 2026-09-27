@@ -136,13 +136,14 @@ button:focus-visible, select:focus-visible, summary:focus-visible {
 }
 .icon-button:not(:disabled):hover { background: #e9f2f8; }
 .canvas-stage {
+    position: relative;
     display: grid;
     place-items: center;
     min-height: 420px;
     padding: 24px;
     background: radial-gradient(circle at 50% 45%, #263a4e 0, #122537 72%);
 }
-canvas {
+#imageCanvas {
     display: block;
     width: 100%;
     max-width: 1100px;
@@ -152,7 +153,39 @@ canvas {
     cursor: grab;
     touch-action: none;
 }
-canvas.dragging { cursor: grabbing; }
+#imageCanvas.dragging { cursor: grabbing; }
+.minimap {
+    position: absolute;
+    right: 38px;
+    bottom: 38px;
+    width: 236px;
+    padding: 8px;
+    border: 1px solid rgba(255, 255, 255, .7);
+    border-radius: 10px;
+    background: rgba(15, 31, 46, .92);
+    box-shadow: 0 8px 26px rgba(0, 0, 0, .34);
+    pointer-events: auto;
+}
+.minimap[hidden] { display: none; }
+.minimap-label {
+    display: block;
+    margin-bottom: 5px;
+    color: #fff;
+    font-size: .65rem;
+    font-weight: 800;
+    letter-spacing: .11em;
+}
+.minimap-frame { position: relative; cursor: crosshair; touch-action: none; }
+.minimap-frame.dragging { cursor: grabbing; }
+.minimap-frame:focus-visible { outline: 3px solid #75b9fa; outline-offset: 3px; }
+#overviewCanvas { display: block; width: 100%; height: auto; background: #172b3e; }
+.minimap-marker {
+    position: absolute;
+    pointer-events: none;
+    border: 2px solid #fff;
+    background: rgba(255, 255, 255, .12);
+    box-shadow: 0 0 0 1px #173149, 0 0 8px rgba(0, 0, 0, .6);
+}
 .viewer-footer { min-height: 62px; color: #52677a; font-size: .78rem; }
 .viewer-footer p { margin: 0; }
 .viewer-hint { text-align: right; }
@@ -180,5 +213,6 @@ canvas.dragging { cursor: grabbing; }
     .sidebar-divider { margin: 20px 0; }
     .viewer-toolbar, .viewer-footer { flex-wrap: wrap; padding: 14px; }
     .canvas-stage { min-height: 260px; padding: 10px; }
+    .minimap { right: 20px; bottom: 20px; width: 166px; }
     .viewer-hint { text-align: left; }
 }

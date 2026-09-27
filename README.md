@@ -37,6 +37,12 @@ Después decodifica los JPEG y los dibuja en un canvas en las posiciones de
 cada chunk. El navegador usa dos carriles de decodificación y una caché
 GreedyDual-Size de bitmaps limitada a 12 MiB. Los bitmaps expulsados se cierran;
 los chunks de vistas descartadas no se decodifican si siguen pendientes.
+Al completar la primera vista general, aparece una miniatura con un rectángulo
+que indica la región visible; se actualiza al acercar o mover la imagen sin
+solicitar otra copia al servidor. Al hacer zoom, un clic en la miniatura centra
+la vista; también se puede arrastrar sobre ella para elegir el centro. Durante
+el arrastre se mueve el rectángulo y se solicita una sola vista al soltar.
+Con el foco en la miniatura, las flechas mueven la vista.
 
 Las imágenes con al menos 50 000 píxeles en algún lado permiten dos pasos
 adicionales de ampliación visual, 2× y 4×; Las Meninas termina en 1:1.
@@ -113,5 +119,5 @@ binarios PAI se encuentra en [docs/README.md](docs/README.md).
 ## Próximo hito
 
 Medir la memoria y los aciertos de caché con un recorrido repetible en Firefox.
-Después podrá abordarse la miniatura de posición. El navegador todavía reconstruye cada vista
-completa en el canvas y no evita que el servidor reenvíe los JPEG cacheados.
+El navegador todavía reconstruye cada vista completa en el canvas y no evita
+que el servidor reenvíe los JPEG cacheados.

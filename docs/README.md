@@ -539,6 +539,11 @@ de esta cola.
   12 MiB y cerrar los bitmaps expulsados;
 - omitir la decodificación pendiente si la vista ya fue sustituida;
 - esperar a que terminen de dibujarse antes de marcar la vista como completa.
+- copiar la vista inicial terminada a una miniatura de 220 × 150 y dibujar un
+  rectángulo que representa la región visible al hacer zoom o arrastrar;
+- centrar la vista al hacer clic en la miniatura, mostrar el destino mientras
+  se arrastra y pedir una sola vista al soltar; las flechas también mueven la
+  vista cuando la miniatura tiene el foco;
 - solicitar otra generación al acercar, alejar o arrastrar la imagen;
 - limitar el centro solicitado a la zona navegable y omitir vistas de arrastre
   que no cambian el centro.

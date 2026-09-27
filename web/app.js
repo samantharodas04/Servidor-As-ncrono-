@@ -46,6 +46,11 @@ const cacheStatusElement = document.getElementById("cacheStatus");
 const positionStatusElement = document.getElementById("positionStatus");
 const imageCanvas = document.getElementById("imageCanvas");
 const canvasContext = imageCanvas.getContext("2d");
+const overviewPanel = document.getElementById("overviewPanel");
+const overviewFrame = document.getElementById("overviewFrame");
+const overviewCanvas = document.getElementById("overviewCanvas");
+const overviewContext = overviewCanvas.getContext("2d");
+const overviewMarker = document.getElementById("overviewMarker");
 const bitmapCache = new window.BitmapCache(12 * 1024 * 1024);
 
 const scheme = window.location.protocol === "https:" ? "wss" : "ws";
@@ -59,6 +64,8 @@ let activeView = null;
 let currentRequest = null;
 let dragStart = null;
 let wheelTimer = null;
+let overviewGeometry = null;
+let overviewDrag = null;
 
 // Paso 3
 function createPaiMessage(opcode, payloadBytes = 0) {
@@ -394,7 +401,105 @@ function updateCacheStatus() {
         + `${bitmapCache.hits} reutilizadas`;
 }
 
+function clearOverview() {
+    overviewContext.clearRect(0, 0, overviewCanvas.width, overviewCanvas.height);
+    overviewGeometry = null;
+    overviewDrag = null;
+    overviewFrame.classList.remove("dragging");
+    overviewPanel.hidden = true;
+}
+
+function captureOverview(view) {
+    if (view.zoomIndex !== 0) return;
+    const image = catalog.get(view.imageId);
+    if (!image) return;
+
+    const scale = zoomScales(image)[0];
+    const sourceWidth = Math.min(imageCanvas.width, Math.max(1,
+        Math.round(image.width * scale)));
+    const sourceHeight = Math.min(imageCanvas.height, Math.max(1,
+        Math.round(image.height * scale)));
+    const sourceX = Math.floor((imageCanvas.width - sourceWidth) / 2);
+    const sourceY = Math.floor((imageCanvas.height - sourceHeight) / 2);
+    const overviewScale = Math.min(overviewCanvas.width / image.width,
+        overviewCanvas.height / image.height);
+    const width = image.width * overviewScale;
+    const height = image.height * overviewScale;
+    const x = (overviewCanvas.width - width) / 2;
+    const y = (overviewCanvas.height - height) / 2;
+
+    overviewContext.clearRect(0, 0, overviewCanvas.width, overviewCanvas.height);
+    overviewContext.drawImage(imageCanvas,
+        sourceX, sourceY, sourceWidth, sourceHeight, x, y, width, height);
+    overviewGeometry = {imageId: image.id, x, y, width, height};
+    overviewPanel.hidden = false;
+    updateOverviewMarker(view);
+}
+
+function updateOverviewMarker(view) {
+    if (!overviewGeometry || overviewGeometry.imageId !== view.imageId) return;
+    const image = catalog.get(view.imageId);
+    if (!image || view.regionX + view.regionWidth > image.width
+            || view.regionY + view.regionHeight > image.height) return;
+
+    const rawX = overviewGeometry.x + overviewGeometry.width * view.regionX / image.width;
+    const rawY = overviewGeometry.y + overviewGeometry.height * view.regionY / image.height;
+    const rawWidth = overviewGeometry.width * view.regionWidth / image.width;
+    const rawHeight = overviewGeometry.height * view.regionHeight / image.height;
+    const width = Math.max(8, rawWidth);
+    const height = Math.max(8, rawHeight);
+    const x = Math.max(0, Math.min(overviewCanvas.width - width,
+        rawX + (rawWidth - width) / 2));
+    const y = Math.max(0, Math.min(overviewCanvas.height - height,
+        rawY + (rawHeight - height) / 2));
+
+    overviewMarker.style.left = `${x / overviewCanvas.width * 100}%`;
+    overviewMarker.style.top = `${y / overviewCanvas.height * 100}%`;
+    overviewMarker.style.width = `${width / overviewCanvas.width * 100}%`;
+    overviewMarker.style.height = `${height / overviewCanvas.height * 100}%`;
+}
+
+function overviewTarget(event) {
+    if (!currentRequest || currentRequest.zoomIndex === 0
+            || socket.readyState !== WebSocket.OPEN
+            || !activeView || activeView.generationId !== currentRequest.generationId
+            || !overviewGeometry || overviewGeometry.imageId !== currentRequest.imageId) {
+        return null;
+    }
+    const image = catalog.get(currentRequest.imageId);
+    if (!image) return null;
+
+    const bounds = overviewCanvas.getBoundingClientRect();
+    const canvasX = (event.clientX - bounds.left) * overviewCanvas.width / bounds.width;
+    const canvasY = (event.clientY - bounds.top) * overviewCanvas.height / bounds.height;
+    const sourceX = Math.round(Math.max(0, Math.min(image.width - 1,
+        (canvasX - overviewGeometry.x) * image.width / overviewGeometry.width)));
+    const sourceY = Math.round(Math.max(0, Math.min(image.height - 1,
+        (canvasY - overviewGeometry.y) * image.height / overviewGeometry.height)));
+    const scale = zoomScales(image)[currentRequest.zoomIndex];
+    const scaleX = Math.max(1, Math.round(image.width * scale)) / image.width;
+    const scaleY = Math.max(1, Math.round(image.height * scale)) / image.height;
+    return {
+        centerX: clampVisibleCenter(sourceX, image.width, imageCanvas.width / scaleX),
+        centerY: clampVisibleCenter(sourceY, image.height, imageCanvas.height / scaleY)
+    };
+}
+
+function previewOverviewTarget(target) {
+    const image = catalog.get(currentRequest.imageId);
+    const regionWidth = activeView.regionWidth;
+    const regionHeight = activeView.regionHeight;
+    updateOverviewMarker({
+        ...activeView,
+        regionX: Math.max(0, Math.min(image.width - regionWidth,
+            Math.round(target.centerX - regionWidth / 2))),
+        regionY: Math.max(0, Math.min(image.height - regionHeight,
+            Math.round(target.centerY - regionHeight / 2)))
+    });
+}
+
 function showCatalog(images) {
+    clearOverview();
     bitmapCache.clear();
     updateCacheStatus();
     catalog.clear();
@@ -439,6 +544,7 @@ function receiveViewStart(buffer) {
         nextDrawLane: 0,
         drawError: null
     };
+    updateOverviewMarker(activeView);
     viewStatusElement.textContent =
         `VIEW ${message.generationId}: esperando ${message.chunkCount} chunks`;
 }
@@ -513,6 +619,7 @@ async function receiveViewEnd(buffer) {
     await Promise.all(view.drawLanes);
     if (activeView !== view) return;
     if (view.drawError) throw view.drawError;
+    captureOverview(view);
     viewStatusElement.textContent =
         `VIEW ${message.generationId} completa: ${message.chunkCount} chunks, `
         + formatBytes(Number(message.totalJpegBytes));
@@ -560,6 +667,7 @@ socket.addEventListener("message", async (event) => {
 
 socket.addEventListener("close", () => {
     activeView = null;
+    clearOverview();
     bitmapCache.clear();
     updateCacheStatus();
     statusElement.textContent = "Desconectado";
@@ -584,6 +692,7 @@ imageSelect.addEventListener("change", () => {
     activeView = null;
     latestRequestedGenerationId = 0n;
     canvasContext.clearRect(0, 0, imageCanvas.width, imageCanvas.height);
+    clearOverview();
     showSelectedImage();
     const image = catalog.get(imageSelect.value);
     if (wasViewing && image) requestView(initialView(image));
@@ -596,6 +705,60 @@ sendValidButton.addEventListener("click", () => {
 
 zoomOutButton.addEventListener("click", () => changeZoom(-1));
 zoomInButton.addEventListener("click", () => changeZoom(1));
+
+overviewFrame.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    const target = overviewTarget(event);
+    if (!target) return;
+    event.preventDefault();
+    overviewFrame.focus();
+    overviewDrag = {pointerId: event.pointerId, generationId: currentRequest.generationId};
+    overviewFrame.setPointerCapture(event.pointerId);
+    overviewFrame.classList.add("dragging");
+    previewOverviewTarget(target);
+});
+
+overviewFrame.addEventListener("pointermove", (event) => {
+    if (!overviewDrag || overviewDrag.pointerId !== event.pointerId
+            || overviewDrag.generationId !== currentRequest?.generationId) return;
+    const target = overviewTarget(event);
+    if (target) previewOverviewTarget(target);
+});
+
+overviewFrame.addEventListener("pointerup", (event) => {
+    if (!overviewDrag || overviewDrag.pointerId !== event.pointerId) return;
+    const generationId = overviewDrag.generationId;
+    overviewDrag = null;
+    overviewFrame.classList.remove("dragging");
+    if (generationId !== currentRequest?.generationId) return;
+    const target = overviewTarget(event);
+    if (target && (target.centerX !== currentRequest.centerX
+            || target.centerY !== currentRequest.centerY)) {
+        requestView({...currentRequest, ...target});
+    } else if (activeView) {
+        updateOverviewMarker(activeView);
+    }
+});
+
+overviewFrame.addEventListener("pointercancel", () => {
+    overviewDrag = null;
+    overviewFrame.classList.remove("dragging");
+    if (activeView) updateOverviewMarker(activeView);
+});
+
+overviewFrame.addEventListener("keydown", (event) => {
+    const horizontal = imageCanvas.width / 4;
+    const vertical = imageCanvas.height / 4;
+    const movement = {
+        ArrowLeft: [horizontal, 0],
+        ArrowRight: [-horizontal, 0],
+        ArrowUp: [0, vertical],
+        ArrowDown: [0, -vertical]
+    }[event.key];
+    if (!movement || !currentRequest || currentRequest.zoomIndex === 0) return;
+    event.preventDefault();
+    moveView(...movement);
+});
 
 imageCanvas.addEventListener("wheel", (event) => {
     if (!currentRequest || socket.readyState !== WebSocket.OPEN) return;
