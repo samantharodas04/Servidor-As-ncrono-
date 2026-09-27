@@ -3,6 +3,7 @@ package view;
 import cache.ChunkCache;
 import cache.ChunkCacheKey;
 import image.ImageSource;
+import image.PreparedSourceStore;
 import image.PreparedView;
 import image.RenderedChunk;
 import image.VipsChunkRenderer;
@@ -10,6 +11,8 @@ import image.VipsViewPreparer;
 import worker.ChunkWorkerPool;
 
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -21,6 +24,7 @@ public final class ViewProcessor implements AutoCloseable {
 
     private final Map<String, ImageSource> sourcesById;
     private final VipsViewPreparer viewPreparer;
+    private final PreparedSourceStore sourceStore;
     private final ChunkWorkerPool workers;
     private final ChunkCache cache;
 
@@ -31,6 +35,7 @@ public final class ViewProcessor implements AutoCloseable {
     public ViewProcessor(List<ImageSource> sources, int workerCount, long maximumCacheBytes) {
         this.sourcesById = indexSources(sources);
         this.viewPreparer = new VipsViewPreparer();
+        this.sourceStore = new PreparedSourceStore(Path.of("images", "processed"));
         this.workers = new ChunkWorkerPool(workerCount, new VipsChunkRenderer());
         this.cache = new ChunkCache(maximumCacheBytes);
     }
@@ -38,6 +43,7 @@ public final class ViewProcessor implements AutoCloseable {
     public ViewResult render(ViewRequest request) throws IOException {
         long startedAt = System.nanoTime();
         ImageSource source = findSource(request.imageId());
+        ensureSourceUnchanged(source);
         ZoomLevel zoomLevel = findZoomLevel(source, request);
         StableChunkPlan stablePlan = ChunkPlanner.plan(
                 source.width(),
@@ -70,11 +76,15 @@ public final class ViewProcessor implements AutoCloseable {
             StableChunkPlan generationPlan = ChunkPreparationPlanner.forMissingChunks(
                     stablePlan, missing
             );
+            PreparedSourceStore.ResolvedSource renderSource = sourceStore.resolve(
+                    source, stablePlan.scaleX(), stablePlan.scaleY()
+            );
 
             long preparationStartedAt = System.nanoTime();
             List<RenderedChunk> generated;
             try (PreparedView preparedView = viewPreparer.prepare(
-                    source.path(), generationPlan
+                    renderSource.path(), generationPlan,
+                    renderSource.ratioX(), renderSource.ratioY()
             )) {
                 preparationMillis = elapsedMillis(preparationStartedAt);
                 ensureNotCancelled();
@@ -167,6 +177,15 @@ public final class ViewProcessor implements AutoCloseable {
             throw new IllegalArgumentException("Imagen desconocida: " + imageId);
         }
         return source;
+    }
+
+    private void ensureSourceUnchanged(ImageSource source) throws IOException {
+        if (Files.size(source.path()) != source.sizeBytes()
+                || Files.getLastModifiedTime(source.path()).toMillis()
+                        != source.modifiedMillis()) {
+            throw new IOException("El original cambio; reinicie el servidor para actualizar "
+                    + "el catalogo: " + source.fileName());
+        }
     }
 
     private ZoomLevel findZoomLevel(ImageSource source, ViewRequest request) {

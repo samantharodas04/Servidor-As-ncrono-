@@ -192,6 +192,44 @@ región temporal reducida
 
 El archivo temporal se elimina cuando termina la preparación.
 
+#### Fuentes gigantes y formatos
+
+La ruta normal sigue generando solo los chunks JPEG solicitados. Sin embargo,
+un PNG enorme no permite acceder rápidamente a una zona arbitraria: la
+descompresión puede superar los 60 segundos de una solicitud. Para formatos
+gigantes no JPEG se ejecuta explícitamente `make prepare-image IMAGE=ID`.
+Para mostrar solo la vista general se puede ejecutar
+`make prepare-overview IMAGE=ID` y completar el BigTIFF después.
+
+```text
+original intacto (formato no JPEG legible por libvips)
+       ├── vista general JPEG, lado máximo 4096 px
+       └── BigTIFF mosaico con Deflate, resolución original, sin pirámide
+                   │
+                   └── región temporal de la vista → chunks JPEG bajo demanda
+```
+
+JPEG/JPG sigue usando reducción al abrir y no necesita ese paso. El catálogo
+reconoce PNG, TIFF, PSB, WebP y AVIF como imágenes estáticas. Los archivos
+pequeños pueden leerse directamente. Para
+una fuente no JPEG de más de 100 millones de píxeles, la vista general sirve
+los zooms que no exceden su resolución y el BigTIFF mosaico los zooms más
+detallados. PSB solo funciona si la instalación de libvips puede abrir el
+archivo concreto; la extensión por sí sola no lo garantiza.
+
+Si un original no se puede leer, el catálogo muestra un aviso `[IMAGE] Omitida`
+y continúa con las demás imágenes. El archivo rechazado no aparece en la lista
+del navegador y permanece intacto en `images/originals`.
+
+La preparación es costosa y se hace una vez por versión del original. Los
+derivados se publican al terminar, en `images/processed`, con nombres basados
+en ID, tamaño y fecha. No se envían completos al navegador ni reemplazan los
+chunks. Conservarlos ocupa espacio en disco; no se generan al arrancar el
+servidor.
+
+Si un original cambia mientras el servidor está abierto, se rechaza la vista
+hasta reiniciar el servidor y actualizar el catálogo.
+
 ### Paso 5: agregar caché
 
 `ChunkCache` es una caché LRU limitada a 32 MiB. Su clave identifica de manera

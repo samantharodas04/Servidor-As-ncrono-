@@ -61,7 +61,7 @@ public final class ImageHeaderReader {
     private int readVipsField(Path image, String field) throws IOException {
         Process process = new ProcessBuilder(
                 "vipsheader", "-f", field, image.toAbsolutePath().toString()
-        ).redirectErrorStream(true).start();
+        ).start();
 
         final boolean completed;
         try {
@@ -77,8 +77,12 @@ public final class ImageHeaderReader {
         }
 
         String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8).trim();
+        String errors = new String(
+                process.getErrorStream().readAllBytes(), StandardCharsets.UTF_8
+        ).trim();
         if (process.exitValue() != 0) {
-            throw new IOException("vipsheader no pudo leer " + image.getFileName() + ": " + output);
+            throw new IOException("vipsheader no pudo leer " + image.getFileName()
+                    + ": " + (errors.isEmpty() ? output : errors));
         }
 
         try {

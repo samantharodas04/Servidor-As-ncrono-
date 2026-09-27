@@ -13,7 +13,7 @@ import java.util.Set;
 /** Descubre archivos originales y lee solamente sus encabezados. */
 public final class ImageCatalog {
     private static final Set<String> SUPPORTED_EXTENSIONS = Set.of(
-            "jpg", "jpeg", "png", "tif", "tiff", "psb"
+            "jpg", "jpeg", "png", "tif", "tiff", "psb", "webp", "avif"
     );
 
     private final Path originalsDirectory;
@@ -44,23 +44,57 @@ public final class ImageCatalog {
         for (Path file : files) {
             String fileName = file.getFileName().toString();
             String id = createId(fileName);
+            ImageSource source;
+            try {
+                source = readSource(file, id);
+            } catch (IOException e) {
+                String reason = e.getMessage() == null ? e.toString()
+                        : e.getMessage().lines().findFirst().orElse(e.toString());
+                System.err.println("[IMAGE] Omitida " + fileName + ": " + reason);
+                continue;
+            }
             if (!assignedIds.add(id)) {
                 throw new IOException("Dos imagenes producen el mismo identificador: " + id);
             }
 
-            ImageDimensions dimensions = headerReader.read(file);
-            sources.add(new ImageSource(
-                    id,
-                    fileName,
-                    file,
-                    Files.size(file),
-                    Files.getLastModifiedTime(file).toMillis(),
-                    dimensions.width(),
-                    dimensions.height()
-            ));
+            sources.add(source);
         }
 
         return List.copyOf(sources);
+    }
+
+    /** Busca un solo original sin abrir los encabezados de los demas archivos. */
+    public ImageSource findById(String requestedId) throws IOException {
+        Files.createDirectories(originalsDirectory);
+        List<Path> matches;
+        try (var entries = Files.list(originalsDirectory)) {
+            matches = entries
+                    .filter(Files::isRegularFile)
+                    .filter(ImageCatalog::hasSupportedExtension)
+                    .filter(path -> createId(path.getFileName().toString()).equals(requestedId))
+                    .toList();
+        }
+        if (matches.isEmpty()) {
+            throw new IOException("Imagen desconocida: " + requestedId);
+        }
+        if (matches.size() > 1) {
+            throw new IOException("Dos imagenes producen el mismo identificador: "
+                    + requestedId);
+        }
+        return readSource(matches.get(0), requestedId);
+    }
+
+    private ImageSource readSource(Path file, String id) throws IOException {
+        ImageDimensions dimensions = headerReader.read(file);
+        return new ImageSource(
+                id,
+                file.getFileName().toString(),
+                file,
+                Files.size(file),
+                Files.getLastModifiedTime(file).toMillis(),
+                dimensions.width(),
+                dimensions.height()
+        );
     }
 
     private static boolean hasSupportedExtension(Path path) {

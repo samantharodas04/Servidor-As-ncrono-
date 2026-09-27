@@ -1,16 +1,17 @@
 COLOQUE AQUI LAS IMAGENES ORIGINALES.
 
-Formatos reconocidos actualmente: JPG, JPEG, PNG, TIF, TIFF y PSB.
+Formatos reconocidos: JPG, JPEG, PNG, TIF, TIFF, PSB, WEBP y AVIF.
 
-El flujo nuevo no ejecuta una preparacion exhaustiva ni crea una piramide en
-images/processed. Main descubre los originales, calcula la vista solicitada y
-genera bajo demanda solamente los chunks necesarios.
+Main descubre los originales y genera bajo demanda solo los chunks solicitados.
+Para fuentes no JPEG gigantes puede prepararse una vista general y un BigTIFF
+mosaico de resolucion completa en images/processed; no es una piramide.
 
 Desde la raiz del proyecto:
 
   make check-tools
+  make prepare-image IMAGE=ID  # solo si una fuente gigante lo necesita
+  make prepare-overview IMAGE=ID  # solo vista general
   make run
 
-La imagen usada por la demostracion actual se selecciona temporalmente mediante
-la constante IMAGE_ID de src/Main.java. La seleccion llegara desde el cliente
-cuando se conecte el siguiente hito WebSocket.
+La imagen se selecciona desde el navegador. PSB requiere que libvips pueda
+abrir el archivo concreto; el nombre de extension no basta.

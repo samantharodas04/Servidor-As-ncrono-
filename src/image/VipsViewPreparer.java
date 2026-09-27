@@ -18,9 +18,19 @@ public final class VipsViewPreparer {
     private static final int[] JPEG_SHRINK_FACTORS = {8, 4, 2};
 
     public PreparedView prepare(Path source, StableChunkPlan stablePlan) throws IOException {
+        return prepare(source, stablePlan, 1.0, 1.0);
+    }
+
+    public PreparedView prepare(
+            Path source, StableChunkPlan stablePlan, double sourceRatioX, double sourceRatioY
+    ) throws IOException {
+        if (!Double.isFinite(sourceRatioX) || !Double.isFinite(sourceRatioY)
+                || sourceRatioX <= 0 || sourceRatioY <= 0) {
+            throw new IllegalArgumentException("Relacion de fuente invalida");
+        }
         Path normalizedSource = source.toAbsolutePath().normalize();
         if (!Files.isRegularFile(normalizedSource)) {
-            throw new IOException("La imagen original no existe: " + source.getFileName());
+            throw new IOException("La fuente de imagen no existe: " + source.getFileName());
         }
 
         ViewChunkPlan chunkPlan = stablePlan.chunkPlan();
@@ -30,12 +40,14 @@ public final class VipsViewPreparer {
         }
 
         int decoderShrink = chooseDecoderShrink(
-                normalizedSource, stablePlan.scaleX(), stablePlan.scaleY()
+                normalizedSource, stablePlan.scaleX() / sourceRatioX,
+                stablePlan.scaleY() / sourceRatioY
         );
         Path preparedPath = Files.createTempFile("prepared-view-", ".v");
         boolean completed = false;
         try {
-            runVips(normalizedSource, preparedPath, stablePlan, decoderShrink);
+            runVips(normalizedSource, preparedPath, stablePlan,
+                    sourceRatioX, sourceRatioY, decoderShrink);
 
             long preparedBytes = Files.size(preparedPath);
             if (preparedBytes <= 0 || preparedBytes > MAX_PREPARED_BYTES) {
@@ -61,13 +73,13 @@ public final class VipsViewPreparer {
             Path source,
             Path output,
             StableChunkPlan stablePlan,
-            int decoderShrink
+            double sourceRatioX, double sourceRatioY, int decoderShrink
     ) throws IOException {
         ViewChunkPlan chunkPlan = stablePlan.chunkPlan();
-        double decoderScaleX = stablePlan.scaleX() * decoderShrink;
-        double decoderScaleY = stablePlan.scaleY() * decoderShrink;
-        double decoderX = stablePlan.sourceOriginX() / decoderShrink;
-        double decoderY = stablePlan.sourceOriginY() / decoderShrink;
+        double decoderScaleX = stablePlan.scaleX() * decoderShrink / sourceRatioX;
+        double decoderScaleY = stablePlan.scaleY() * decoderShrink / sourceRatioY;
+        double decoderX = stablePlan.sourceOriginX() * sourceRatioX / decoderShrink;
+        double decoderY = stablePlan.sourceOriginY() * sourceRatioY / decoderShrink;
 
         String inputWithOptions = decoderShrink == 1
                 ? source.toString()
@@ -75,7 +87,7 @@ public final class VipsViewPreparer {
         String matrix = decoderScaleX + " 0 0 " + decoderScaleY;
 
         System.out.printf(
-                "Preparando tiles %dx%d desde %s con reduccion JPEG %dx%n",
+                "Preparando tiles %dx%d desde %s con reduccion de decodificador %dx%n",
                 chunkPlan.renderedWidth(),
                 chunkPlan.renderedHeight(),
                 source.getFileName(),

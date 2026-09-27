@@ -13,6 +13,7 @@ El flujo nuevo ya incluye:
 - regiones visibles según centro y viewport;
 - chunks fijos de hasta `512 × 512`;
 - preparación regional con libvips;
+- preparación opcional de fuentes gigantes sin crear una pirámide;
 - pool limitado de workers;
 - generaciones y cancelación de solicitudes obsoletas;
 - caché LRU en memoria limitada por bytes;
@@ -54,6 +55,20 @@ Verificar herramientas:
 make check-tools
 ```
 
+Para una imagen no JPEG gigante que necesite preparación, ejecutar una vez:
+
+```bash
+make prepare-image IMAGE=017-110-000-24650032
+```
+
+Si solo se necesita el zoom general de un original enorme, se puede generar
+únicamente la vista previa con `make prepare-overview IMAGE=ID`. El zoom
+detallado seguirá requiriendo `make prepare-image IMAGE=ID`.
+
+El proceso puede tardar y ocupar varios GiB. Crea una vista general JPEG y un
+BigTIFF mosaico de resolución completa en `images/processed`; conserva el
+original y no genera una pirámide. `make run` no realiza esta conversión.
+
 ## Directorios
 
 ```text
@@ -67,7 +82,8 @@ web/          cliente mínimo para probar VIEW
 ```
 
 Los originales se colocan en `images/originals`. `images/processed` no se usa
-para construir una pirámide persistente.
+para construir una pirámide persistente. Los derivados tienen el ID, tamaño y
+fecha del original en su nombre; una nueva versión no reutiliza archivos viejos.
 
 La bitácora detallada del rediseño está en:
 
