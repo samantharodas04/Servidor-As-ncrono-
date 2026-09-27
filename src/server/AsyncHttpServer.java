@@ -376,8 +376,8 @@ public final class AsyncHttpServer implements AutoCloseable {
         System.out.printf(
                 "[VIEW] enviada | generationId=%d | imageId=%s | zoomIndex=%d "
                         + "| region=(%d,%d %dx%d) | chunks=%d | cache=%d "
-                        + "| generados=%d | imageBytes=%d | preparar=%dms "
-                        + "| chunks=%dms | total=%dms%n",
+                        + "| generados=%d | imageBytes=%d | preparar%s=%dms "
+                        + "| chunks%s=%dms | total=%dms%n",
                 generationId,
                 result.source().id(),
                 result.request().zoomIndex(),
@@ -389,7 +389,9 @@ public final class AsyncHttpServer implements AutoCloseable {
                 result.cacheHits(),
                 result.generatedChunks(),
                 result.totalChunkBytes(),
+                result.individualPreparation() ? "-suma-workers" : "",
                 result.preparationMillis(),
+                result.individualPreparation() ? "-suma-workers" : "",
                 result.chunkMillis(),
                 result.totalMillis()
         );

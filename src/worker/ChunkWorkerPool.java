@@ -1,8 +1,12 @@
 package worker;
 
 import image.ChunkRenderer;
+import image.PreparedView;
 import image.RenderedChunk;
+import image.VipsViewPreparer;
+import view.ChunkPreparationPlanner;
 import view.PlannedChunk;
+import view.StableChunkPlan;
 import view.ViewChunkPlan;
 
 import java.io.IOException;
@@ -19,7 +23,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 
-/** Recorta en paralelo la vista temporal; cada resultado sale como JPEG o PNG. */
+/** Prepara o recorta con workers limitados; entrega cada JPEG o PNG al terminar. */
 public final class ChunkWorkerPool implements AutoCloseable {
     private final ExecutorService executor;
     private final ChunkRenderer renderer;
@@ -53,23 +57,63 @@ public final class ChunkWorkerPool implements AutoCloseable {
     public void renderAsCompleted(Path preparedView, ViewChunkPlan plan,
                                   int jpegQuality, boolean png, ChunkSink sink)
             throws IOException {
-        CompletionService<RenderedChunk> completed = new ExecutorCompletionService<>(executor);
-        List<Future<RenderedChunk>> pending = new ArrayList<>(plan.chunks().size());
+        renderTasks(plan.chunks(), chunk -> {
+            System.out.printf("%s recorta chunk [%d,%d]%n",
+                    Thread.currentThread().getName(), chunk.column(), chunk.row());
+            PlannedChunk local = toPreparedViewChunk(chunk, plan);
+            return new PreparedChunk(new RenderedChunk(chunk,
+                    renderer.render(preparedView, local, jpegQuality, png), png), 0, 0);
+        }, completed -> sink.accept(completed.rendered()));
+    }
+
+    /** Para TIFF reducido, prepara y codifica cada chunk sin esperar el area completa. */
+    public ChunkTimes renderIndividuallyAsCompleted(
+            Path source, StableChunkPlan fullPlan, List<PlannedChunk> missing,
+            double ratioX, double ratioY, int jpegQuality, boolean png, ChunkSink sink
+    ) throws IOException {
+        long[] nanos = new long[2];
+        renderTasks(missing, chunk -> {
+            StableChunkPlan one = ChunkPreparationPlanner.forMissingChunks(
+                    fullPlan, List.of(chunk));
+            long started = System.nanoTime();
+            try (PreparedView prepared = new VipsViewPreparer().prepare(
+                    source, one, ratioX, ratioY)) {
+                long preparationNanos = System.nanoTime() - started;
+                System.out.printf("%s recorta chunk [%d,%d]%n",
+                        Thread.currentThread().getName(), chunk.column(), chunk.row());
+                long renderingStarted = System.nanoTime();
+                PlannedChunk local = toPreparedViewChunk(chunk, one.chunkPlan());
+                byte[] bytes = renderer.render(prepared.path(), local, jpegQuality, png);
+                return new PreparedChunk(new RenderedChunk(chunk, bytes, png),
+                        preparationNanos, System.nanoTime() - renderingStarted);
+            }
+        }, completed -> {
+            nanos[0] += completed.preparationNanos();
+            nanos[1] += completed.renderNanos();
+            sink.accept(completed.rendered());
+        });
+        return new ChunkTimes(nanos[0], nanos[1]);
+    }
+
+    private void renderTasks(List<PlannedChunk> chunks, ChunkTask task,
+                             PreparedChunkSink sink) throws IOException {
+        CompletionService<PreparedChunk> completed = new ExecutorCompletionService<>(executor);
+        List<Future<PreparedChunk>> pending = new ArrayList<>(chunks.size());
         int next = 0;
-        int total = plan.chunks().size();
+        int total = chunks.size();
         boolean allDelivered = false;
         try {
             while (next < total && next < workerCount) {
-                pending.add(submit(completed, preparedView, plan,
-                        plan.chunks().get(next++), jpegQuality, png));
+                PlannedChunk chunk = chunks.get(next++);
+                pending.add(completed.submit(() -> task.run(chunk)));
             }
             for (int delivered = 0; delivered < total; delivered++) {
-                Future<RenderedChunk> finished = completed.take();
+                Future<PreparedChunk> finished = completed.take();
                 pending.remove(finished);
                 sink.accept(finished.get());
                 if (next < total) {
-                    pending.add(submit(completed, preparedView, plan,
-                            plan.chunks().get(next++), jpegQuality, png));
+                    PlannedChunk chunk = chunks.get(next++);
+                    pending.add(completed.submit(() -> task.run(chunk)));
                 }
             }
             allDelivered = true;
@@ -89,23 +133,26 @@ public final class ChunkWorkerPool implements AutoCloseable {
         }
     }
 
-    private Future<RenderedChunk> submit(
-            CompletionService<RenderedChunk> completed, Path preparedView, ViewChunkPlan plan,
-            PlannedChunk originalChunk, int jpegQuality, boolean png
-    ) {
-        return completed.submit(() -> {
-            System.out.printf("%s recorta chunk [%d,%d]%n",
-                    Thread.currentThread().getName(),
-                    originalChunk.column(), originalChunk.row());
-            PlannedChunk localChunk = toPreparedViewChunk(originalChunk, plan);
-            byte[] bytes = renderer.render(preparedView, localChunk, jpegQuality, png);
-            return new RenderedChunk(originalChunk, bytes, png);
-        });
-    }
-
     @FunctionalInterface
     public interface ChunkSink {
         void accept(RenderedChunk chunk) throws IOException;
+    }
+
+    public record ChunkTimes(long preparationNanos, long renderNanos) {
+    }
+
+    private record PreparedChunk(RenderedChunk rendered,
+                                 long preparationNanos, long renderNanos) {
+    }
+
+    @FunctionalInterface
+    private interface ChunkTask {
+        PreparedChunk run(PlannedChunk chunk) throws IOException;
+    }
+
+    @FunctionalInterface
+    private interface PreparedChunkSink {
+        void accept(PreparedChunk chunk) throws IOException;
     }
 
     private PlannedChunk toPreparedViewChunk(
@@ -128,8 +175,8 @@ public final class ChunkWorkerPool implements AutoCloseable {
         );
     }
 
-    private void cancelPending(List<Future<RenderedChunk>> pending) {
-        for (Future<RenderedChunk> future : pending) {
+    private void cancelPending(List<Future<PreparedChunk>> pending) {
+        for (Future<PreparedChunk> future : pending) {
             future.cancel(true);
         }
     }

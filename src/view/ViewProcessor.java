@@ -22,6 +22,8 @@ import java.util.Objects;
 /** Convierte VIEW en chunks JPEG o PNG; no conoce el navegador ni el WebSocket. */
 public final class ViewProcessor implements AutoCloseable {
     private static final long DEFAULT_CACHE_BYTES = 32L * 1024L * 1024L;
+    // Bajo 1/4, preparar toda la ventana del BigTIFF retrasa el primer chunk.
+    private static final double INDIVIDUAL_TIFF_MAX_SCALE = 0.25;
 
     private final Map<String, ImageSource> sourcesById;
     private final VipsViewPreparer viewPreparer;
@@ -81,6 +83,7 @@ public final class ViewProcessor implements AutoCloseable {
         int cacheHits = available.size();
         long preparationMillis = 0;
         long chunkMillis = 0;
+        boolean individualPreparation = false;
         StableChunkPlan generationPlan = null;
         if (!missing.isEmpty()) {
             // La geometria se conoce antes de abrir el derivado o generar pixeles.
@@ -113,31 +116,46 @@ public final class ViewProcessor implements AutoCloseable {
             long preparationNanos;
             long chunkNanos;
             Map<PlannedChunk, RenderedChunk> generatedByChunk = new LinkedHashMap<>();
-            try (PreparedView preparedView = viewPreparer.prepare(
-                    renderSource.path(), generationPlan,
-                    renderSource.ratioX(), renderSource.ratioY()
-            )) {
-                preparationNanos = System.nanoTime() - preparationStartedAt;
-                preparationMillis = preparationNanos / 1_000_000L;
+            ChunkWorkerPool.ChunkSink deliver = rendered -> {
                 ensureNotCancelled();
-                long chunksStartedAt = System.nanoTime();
-                workers.renderAsCompleted(
-                        preparedView.path(), generationPlan.chunkPlan(),
-                        zoomLevel.scale() > 1.0 ? 92 : 85, losslessChunks,
-                        rendered -> {
-                            ensureNotCancelled();
-                            Integer index = indexByChunk.get(rendered.chunk());
-                            if (index == null || generatedByChunk.putIfAbsent(
-                                    rendered.chunk(), rendered) != null) {
-                                throw new IOException("Worker entrego un chunk inesperado");
-                            }
-                            available.put(rendered.chunk(), rendered);
-                            progress.onChunk(request, index, rendered);
-                        }
+                Integer index = indexByChunk.get(rendered.chunk());
+                if (index == null || generatedByChunk.putIfAbsent(
+                        rendered.chunk(), rendered) != null) {
+                    throw new IOException("Worker entrego un chunk inesperado");
+                }
+                available.put(rendered.chunk(), rendered);
+                progress.onChunk(request, index, rendered);
+            };
+            boolean individualTiff = renderSource.path().getFileName().toString()
+                    .endsWith(".tiles.tif")
+                    && Math.max(stablePlan.scaleX(), stablePlan.scaleY())
+                    < INDIVIDUAL_TIFF_MAX_SCALE
+                    && missing.size() > 1;
+            if (individualTiff) {
+                individualPreparation = true;
+                // Dos workers como maximo leen regiones independientes; el primer chunk sale pronto.
+                ChunkWorkerPool.ChunkTimes times = workers.renderIndividuallyAsCompleted(
+                        renderSource.path(), stablePlan, missing,
+                        renderSource.ratioX(), renderSource.ratioY(),
+                        zoomLevel.scale() > 1.0 ? 92 : 85, losslessChunks, deliver
                 );
-                chunkNanos = System.nanoTime() - chunksStartedAt;
-                chunkMillis = chunkNanos / 1_000_000L;
+                preparationNanos = times.preparationNanos();
+                chunkNanos = times.renderNanos();
+            } else {
+                try (PreparedView preparedView = viewPreparer.prepare(
+                        renderSource.path(), generationPlan,
+                        renderSource.ratioX(), renderSource.ratioY()
+                )) {
+                    preparationNanos = System.nanoTime() - preparationStartedAt;
+                    ensureNotCancelled();
+                    long chunksStartedAt = System.nanoTime();
+                    workers.renderAsCompleted(preparedView.path(), generationPlan.chunkPlan(),
+                            zoomLevel.scale() > 1.0 ? 92 : 85, losslessChunks, deliver);
+                    chunkNanos = System.nanoTime() - chunksStartedAt;
+                }
             }
+            preparationMillis = preparationNanos / 1_000_000L;
+            chunkMillis = chunkNanos / 1_000_000L;
 
             ensureNotCancelled();
             List<RenderedChunk> generated = missing.stream()
@@ -170,6 +188,7 @@ public final class ViewProcessor implements AutoCloseable {
                 orderedChunks,
                 cacheHits,
                 missing.size(),
+                individualPreparation,
                 preparationMillis,
                 chunkMillis,
                 elapsedMillis(startedAt)

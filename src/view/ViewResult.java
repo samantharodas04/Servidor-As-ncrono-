@@ -6,7 +6,7 @@ import image.RenderedChunk;
 import java.util.List;
 import java.util.Objects;
 
-/** Resultado completo de procesar una solicitud de vista. */
+/** Resultado completo; con preparación individual, los tiempos suman ambos workers. */
 public record ViewResult(
         ViewRequest request,
         ImageSource source,
@@ -17,6 +17,7 @@ public record ViewResult(
         List<RenderedChunk> chunks,
         int cacheHits,
         int generatedChunks,
+        boolean individualPreparation,
         long preparationMillis,
         long chunkMillis,
         long totalMillis
