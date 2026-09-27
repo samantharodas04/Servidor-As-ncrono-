@@ -232,7 +232,7 @@ hasta reiniciar el servidor y actualizar el catálogo.
 
 ### Paso 5: agregar caché
 
-`ChunkCache` es una caché LRU limitada a 32 MiB. Su clave identifica de manera
+`ChunkCache` es una caché GreedyDual-Size limitada a 32 MiB. Su clave identifica de manera
 estable:
 
 ```text
@@ -240,6 +240,12 @@ imagen + versión del archivo + zoom + nivel + chunkSize + columna + fila
 ```
 
 Una nueva vista reutiliza los JPEG existentes y genera solamente los faltantes.
+La prioridad de un JPEG es la edad de la última expulsión más el costo estimado
+de generación dividido entre sus MiB. El costo usa el tiempo medido de
+preparación y generación del lote, repartido entre sus chunks faltantes. Al
+llenarse la caché se expulsa la prioridad menor; un acierto renueva la
+prioridad. El costo es una estimación por lote, no una medición individual de
+cada chunk. Se puede verificar la política con `make test-cache`.
 
 ### Paso 6: agregar generaciones y cancelación
 
@@ -488,7 +494,7 @@ Cada `ClientSession` posee:
 - catálogo de imágenes;
 - `ViewProcessor`;
 - dos workers de chunks;
-- caché LRU de 32 MiB.
+- caché GreedyDual-Size de 32 MiB.
 
 ```text
 Cliente A ── coordinador A ──┐
@@ -514,6 +520,10 @@ de esta cola.
 - comprobar la cantidad y la suma total de bytes;
 - ignorar respuestas de una generación que ya no es la solicitada;
 - decodificar los JPEG y dibujarlos en un canvas según `canvasX` y `canvasY`;
+- decodificar hasta dos JPEG a la vez;
+- reutilizar bitmaps de chunks anteriores desde una caché GreedyDual-Size de
+  12 MiB y cerrar los bitmaps expulsados;
+- omitir la decodificación pendiente si la vista ya fue sustituida;
 - esperar a que terminen de dibujarse antes de marcar la vista como completa.
 - solicitar otra generación al acercar, alejar o arrastrar la imagen;
 - limitar el centro solicitado a la zona navegable y omitir vistas de arrastre
@@ -534,6 +544,17 @@ rueda cambian entre los niveles de zoom calculados por el servidor. El arrastre
 solicita un centro nuevo al soltar el puntero. Las generaciones anteriores se
 ignoran al recibirlas y se cancelan en el coordinador del servidor. Aún falta
 gestionar individualmente los chunks en el navegador durante el desplazamiento.
+El navegador tiene una caché GreedyDual-Size de bitmaps decodificados. La
+prioridad de cada entrada suma la edad de la última expulsión y el costo de
+decodificación dividido entre sus bytes estimados (`ancho × alto × 4`). Al
+llenarse los 12 MiB, se expulsa el menor valor y se cierra su `ImageBitmap`.
+La clave usa imagen, tamaño del original, zoom, viewport, fila, columna y
+geometría del chunk. Esta caché evita repetir decodificaciones, pero PAI/1
+todavía envía el JPEG de cada vista completa: no reduce tráfico de red.
+
+La caché del servidor guarda JPEG comprimidos hasta 32 MiB y aplica
+GreedyDual-Size. Es independiente de la caché de bitmaps del navegador:
+los aciertos del servidor evitan regenerar JPEG, pero PAI/1 todavía los envía.
 
 ## 16. Archivos principales
 
@@ -549,9 +570,10 @@ src/protocol/ViewResponseCodec.java   VIEW_START, CHUNK y VIEW_END
 src/view/ViewCoordinator.java         generación activa por cliente
 src/view/ViewProcessor.java           procesamiento completo de la vista
 src/view/ChunkPlanner.java            geometría estable de chunks
-src/cache/ChunkCache.java             caché LRU por bytes
+src/cache/ChunkCache.java             caché GreedyDual-Size de JPEG
 src/worker/ChunkWorkerPool.java       workers limitados
 web/app.js                            codec y estado del navegador
+web/bitmap-cache.js                   caché GreedyDual-Size de bitmaps
 ```
 
 ## 17. Resumen corto

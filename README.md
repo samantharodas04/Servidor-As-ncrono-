@@ -16,7 +16,7 @@ El flujo nuevo ya incluye:
 - preparación opcional de fuentes gigantes sin crear una pirámide;
 - pool limitado de workers;
 - generaciones y cancelación de solicitudes obsoletas;
-- caché LRU en memoria limitada por bytes;
+- caché GreedyDual-Size en memoria limitada por bytes;
 - generación exclusiva de los chunks que no estén en caché;
 - mensaje binario `PAI/1 VIEW` documentado por su codec;
 - servidor HTTP/WebSocket asíncrono en `/pai`;
@@ -34,7 +34,11 @@ nuevas vistas con zoom o centro distintos. El arrastre envía la petición al
 soltar el puntero. El servidor procesa cada vista, envía sus chunks JPEG y el navegador
 valida la generación, la cantidad de chunks y el total de bytes recibidos.
 Después decodifica los JPEG y los dibuja en un canvas en las posiciones de
-cada chunk.
+cada chunk. El navegador usa dos carriles de decodificación y una caché
+GreedyDual-Size de bitmaps limitada a 12 MiB. Los bitmaps expulsados se cierran;
+los chunks de vistas descartadas no se decodifican si siguen pendientes.
+Actualmente el servidor envía todos los chunks de cada vista, aunque el
+navegador pueda reutilizar un bitmap para evitar volver a decodificarlo.
 
 La secuencia de respuesta utiliza números big-endian:
 
@@ -74,13 +78,13 @@ original y no genera una pirámide. `make run` no realiza esta conversión.
 ## Directorios
 
 ```text
-src/cache/    caché LRU
+src/cache/    caché GreedyDual-Size de JPEG
 src/image/    lectura y procesamiento regional
 src/view/     zoom, regiones, chunks, generaciones y coordinación
 src/worker/   pool limitado de workers
 src/protocol/ codec binario PAI/1 VIEW
 src/server/   servidor HTTP/WebSocket y lectura de frames
-web/          cliente PAI/1 con canvas, movimiento y zoom
+web/          cliente PAI/1, caché de bitmaps y visor adaptable
 ```
 
 Los originales se colocan en `images/originals`. `images/processed` no se usa
@@ -98,6 +102,7 @@ binarios PAI se encuentra en [docs/README.md](docs/README.md).
 
 ## Próximo hito
 
-Verificar la navegación con imágenes gigantes y mejorar el descarte visual de
-chunks durante movimientos rápidos. El navegador todavía reconstruye cada vista
-en el canvas; no mantiene una caché propia de bitmaps por chunk.
+Medir la memoria y los aciertos de caché con un recorrido repetible en Firefox.
+Después podrán abordarse la miniatura de posición y la navegación
+más allá de la escala nativa. El navegador todavía reconstruye cada vista
+completa en el canvas y no evita que el servidor reenvíe los JPEG cacheados.

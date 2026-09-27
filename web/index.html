@@ -3,31 +3,85 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Servidor asíncrono de imágenes</title>
+<title>Visor PAI · Imágenes de alta resolución</title>
     <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-<main>
-    <h1>Servidor asíncrono de imágenes</h1>
-    <p>Selecciona una imagen, acerca la vista y arrastra para explorarla.</p>
-    <p><strong>WebSocket:</strong> <span id="connectionStatus">Conectando...</span></p>
-    <p><strong>Catálogo:</strong> <span id="catalogStatus">Pendiente</span></p>
-    <p>
-        <label for="imageSelect">Imagen disponible:</label>
-        <select id="imageSelect" disabled></select>
-    </p>
-    <p id="imageInfo">Ninguna imagen seleccionada</p>
-    <p>
-        <button id="sendValidView" disabled>Mostrar imagen</button>
-        <button id="zoomOut" disabled aria-label="Alejar">−</button>
-        <span id="zoomStatus" aria-live="polite">Zoom: sin imagen</span>
-        <button id="zoomIn" disabled aria-label="Acercar">+</button>
-        <button id="sendInvalidView" disabled>Enviar VIEW inválido</button>
-    </p>
-    <p><strong>Última acción:</strong> <span id="viewStatus">Ninguna</span></p>
-    <canvas id="imageCanvas" width="1100" height="650" aria-label="Vista de la imagen seleccionada"></canvas>
-    <p>Arrastra la imagen para moverte. Usa los botones o la rueda del ratón para cambiar de resolución.</p>
-</main>
+<div class="app-shell">
+    <header class="topbar">
+        <div class="brand">
+            <span class="brand-mark" aria-hidden="true">PAI</span>
+            <div>
+                <strong>Visor de imágenes</strong>
+                <small>Protocolo Asíncrono de Imágenes</small>
+            </div>
+        </div>
+        <div class="connection-indicator" role="status">
+            <span class="status-dot" aria-hidden="true"></span>
+            <span id="connectionStatus">Conectando...</span>
+        </div>
+    </header>
+
+    <main class="workspace">
+        <aside class="sidebar" aria-label="Panel de imagen">
+            <div class="sidebar-heading">
+                <span class="eyebrow">EXPLORADOR</span>
+                <h1>Selecciona una imagen</h1>
+                <p>Explora el detalle sin transferir el original completo.</p>
+            </div>
+
+            <div class="field">
+                <label for="imageSelect">Archivo original</label>
+                <select id="imageSelect" disabled></select>
+            </div>
+            <p id="catalogStatus" class="muted">Cargando catálogo...</p>
+
+            <div class="info-card">
+                <span class="eyebrow">FUENTE ACTUAL</span>
+                <p id="imageInfo">Ninguna imagen seleccionada</p>
+            </div>
+
+            <button id="sendValidView" class="primary-button" disabled>Mostrar imagen</button>
+
+            <div class="sidebar-divider"></div>
+            <div class="info-card subtle">
+                <span class="eyebrow">CACHÉ DEL NAVEGADOR</span>
+                <p id="cacheStatus">0 piezas · 0 B / 12 MiB</p>
+                <small>GreedyDual-Size · límite de 12 MiB.</small>
+            </div>
+
+            <details class="developer-tools">
+                <summary>Herramientas de prueba</summary>
+                <button id="sendInvalidView" class="secondary-button" disabled>Enviar VIEW inválido</button>
+            </details>
+        </aside>
+
+        <section class="viewer-panel" aria-label="Visor">
+            <div class="viewer-toolbar">
+                <div>
+                    <span class="eyebrow">VISTA ACTIVA</span>
+                    <p id="positionStatus">Centro sin seleccionar</p>
+                </div>
+                <div class="zoom-controls" aria-label="Controles de zoom">
+                    <button id="zoomOut" class="icon-button" disabled aria-label="Alejar">−</button>
+                    <span id="zoomStatus" aria-live="polite">Zoom: sin imagen</span>
+                    <button id="zoomIn" class="icon-button" disabled aria-label="Acercar">+</button>
+                </div>
+            </div>
+
+            <div class="canvas-stage">
+                <canvas id="imageCanvas" width="1100" height="650"
+                    aria-label="Vista de la imagen seleccionada"></canvas>
+            </div>
+
+            <div class="viewer-footer">
+                <p id="viewStatus" role="status">Selecciona una imagen para comenzar.</p>
+                <p class="viewer-hint">Arrastra para moverte · Rueda o botones para cambiar de zoom</p>
+            </div>
+        </section>
+    </main>
+</div>
+<script src="/bitmap-cache.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

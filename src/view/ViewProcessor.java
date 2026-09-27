@@ -81,18 +81,22 @@ public final class ViewProcessor implements AutoCloseable {
             );
 
             long preparationStartedAt = System.nanoTime();
+            long preparationNanos;
+            long chunkNanos;
             List<RenderedChunk> generated;
             try (PreparedView preparedView = viewPreparer.prepare(
                     renderSource.path(), generationPlan,
                     renderSource.ratioX(), renderSource.ratioY()
             )) {
-                preparationMillis = elapsedMillis(preparationStartedAt);
+                preparationNanos = System.nanoTime() - preparationStartedAt;
+                preparationMillis = preparationNanos / 1_000_000L;
                 ensureNotCancelled();
                 long chunksStartedAt = System.nanoTime();
                 generated = workers.renderAll(
                         preparedView.path(), generationPlan.chunkPlan()
                 );
-                chunkMillis = elapsedMillis(chunksStartedAt);
+                chunkNanos = System.nanoTime() - chunksStartedAt;
+                chunkMillis = chunkNanos / 1_000_000L;
             }
 
             ensureNotCancelled();
@@ -106,7 +110,9 @@ public final class ViewProcessor implements AutoCloseable {
                         rendered.jpeg()
                 );
             }
-            cache.putAll(completedBatch);
+            double costMillisPerChunk = Math.max(0.001,
+                    (preparationNanos + chunkNanos) / 1_000_000.0 / missing.size());
+            cache.putAll(completedBatch, costMillisPerChunk);
         }
 
         List<RenderedChunk> orderedChunks = completePlan.chunks().stream()

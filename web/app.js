@@ -39,8 +39,11 @@ const zoomStatusElement = document.getElementById("zoomStatus");
 const imageSelect = document.getElementById("imageSelect");
 const imageInfoElement = document.getElementById("imageInfo");
 const catalogStatusElement = document.getElementById("catalogStatus");
+const cacheStatusElement = document.getElementById("cacheStatus");
+const positionStatusElement = document.getElementById("positionStatus");
 const imageCanvas = document.getElementById("imageCanvas");
 const canvasContext = imageCanvas.getContext("2d");
+const bitmapCache = new window.BitmapCache(12 * 1024 * 1024);
 
 const scheme = window.location.protocol === "https:" ? "wss" : "ws";
 const socket = new WebSocket(`${scheme}://${window.location.host}/pai`);
@@ -302,6 +305,7 @@ function updateNavigation() {
     zoomInButton.disabled = !ready || zoomIndex >= levels.length - 1;
     zoomStatusElement.textContent = image
         ? `Zoom ${zoomIndex + 1}/${levels.length}` : "Zoom: sin imagen";
+    sendValidButton.textContent = currentRequest ? "Reiniciar vista" : "Mostrar imagen";
 }
 
 function requestView(view) {
@@ -312,6 +316,7 @@ function requestView(view) {
     activeView = null;
     socket.send(encodeView(request));
     updateNavigation();
+    updatePosition();
     viewStatusElement.textContent =
         `VIEW ${request.generationId} enviado para ${request.imageId}`;
 }
@@ -365,9 +370,26 @@ function showSelectedImage() {
         ? image.width + " × " + image.height + " píxeles | " + formatBytes(image.sizeBytes)
         : "Ninguna imagen seleccionada";
     updateNavigation();
+    updatePosition();
+}
+
+function updatePosition() {
+    positionStatusElement.textContent = currentRequest
+        ? `Centro ${currentRequest.centerX.toLocaleString("es-GT")}, `
+            + `${currentRequest.centerY.toLocaleString("es-GT")}`
+        : "Centro sin seleccionar";
+}
+
+function updateCacheStatus() {
+    cacheStatusElement.textContent = `${bitmapCache.size} piezas · `
+        + `${formatBytes(bitmapCache.currentBytes)} / `
+        + `${formatBytes(bitmapCache.maximumBytes)} · `
+        + `${bitmapCache.hits} reutilizadas`;
 }
 
 function showCatalog(images) {
+    bitmapCache.clear();
+    updateCacheStatus();
     catalog.clear();
     imageSelect.replaceChildren();
     for (const image of images) {
@@ -402,25 +424,46 @@ function receiveViewStart(buffer) {
     imageCanvas.height = message.viewportHeight;
     activeView = {
         ...message,
+        imageId: currentRequest.imageId,
+        sourceSizeBytes: catalog.get(currentRequest.imageId)?.sizeBytes,
         receivedIndexes: new Set(),
         receivedBytes: 0n,
-        drawTasks: []
+        drawLanes: [Promise.resolve(), Promise.resolve()],
+        nextDrawLane: 0,
+        drawError: null
     };
     viewStatusElement.textContent =
         `VIEW ${message.generationId}: esperando ${message.chunkCount} chunks`;
 }
 
 async function drawChunk(view, message) {
+    if (activeView !== view) return;
+    const key = JSON.stringify([
+        view.imageId, view.sourceSizeBytes, view.zoomIndex,
+        view.viewportWidth, view.viewportHeight,
+        message.column, message.row, message.width, message.height
+    ]);
+    const cached = bitmapCache.get(key);
+    if (cached) {
+        canvasContext.drawImage(cached, message.canvasX, message.canvasY);
+        updateCacheStatus();
+        return;
+    }
+
+    const started = performance.now();
     const bitmap = await createImageBitmap(new Blob([message.jpeg], {type: "image/jpeg"}));
+    let retained = false;
     try {
         if (bitmap.width !== message.width || bitmap.height !== message.height) {
             throw new Error("El tamaño JPEG no coincide con CHUNK");
         }
         if (activeView === view) {
             canvasContext.drawImage(bitmap, message.canvasX, message.canvasY);
+            retained = bitmapCache.put(key, bitmap, performance.now() - started);
+            updateCacheStatus();
         }
     } finally {
-        bitmap.close();
+        if (!retained) bitmap.close();
     }
 }
 
@@ -438,10 +481,13 @@ function receiveChunk(buffer) {
         `VIEW ${message.generationId}: ${activeView.receivedIndexes.size}/${activeView.chunkCount} chunks`;
 
     const view = activeView;
-    const drawTask = drawChunk(view, message);
-    view.drawTasks.push(drawTask);
-    drawTask.catch((error) => {
+    const lane = view.nextDrawLane++ % view.drawLanes.length;
+    view.drawLanes[lane] = view.drawLanes[lane].then(() => {
+        if (activeView !== view || view.drawError) return;
+        return drawChunk(view, message);
+    }).catch((error) => {
         if (activeView === view) {
+            view.drawError = error;
             viewStatusElement.textContent = "No se pudo dibujar un CHUNK: " + error.message;
         }
     });
@@ -457,13 +503,9 @@ async function receiveViewEnd(buffer) {
         throw new Error("VIEW_END no coincide con los chunks recibidos");
     }
 
-    try {
-        await Promise.all(view.drawTasks);
-    } catch (error) {
-        if (activeView === view) throw error;
-        return;
-    }
+    await Promise.all(view.drawLanes);
     if (activeView !== view) return;
+    if (view.drawError) throw view.drawError;
     viewStatusElement.textContent =
         `VIEW ${message.generationId} completa: ${message.chunkCount} chunks, `
         + formatBytes(Number(message.totalJpegBytes));
@@ -472,6 +514,7 @@ async function receiveViewEnd(buffer) {
 // Paso 7
 socket.addEventListener("open", () => {
     statusElement.textContent = "Conectado: handshake completado";
+    statusElement.parentElement.dataset.state = "connected";
     catalogStatusElement.textContent = "Solicitando catálogo...";
     socket.send(encodeListImages());
 });
@@ -509,7 +552,11 @@ socket.addEventListener("message", async (event) => {
 });
 
 socket.addEventListener("close", () => {
+    activeView = null;
+    bitmapCache.clear();
+    updateCacheStatus();
     statusElement.textContent = "Desconectado";
+    statusElement.parentElement.dataset.state = "disconnected";
     imageSelect.disabled = true;
     sendValidButton.disabled = true;
     sendInvalidButton.disabled = true;
@@ -518,6 +565,7 @@ socket.addEventListener("close", () => {
 
 socket.addEventListener("error", () => {
     statusElement.textContent = "Error de conexión";
+    statusElement.parentElement.dataset.state = "error";
 });
 
 // Paso 8
