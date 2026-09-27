@@ -515,6 +515,9 @@ de esta cola.
 - ignorar respuestas de una generación que ya no es la solicitada;
 - decodificar los JPEG y dibujarlos en un canvas según `canvasX` y `canvasY`;
 - esperar a que terminen de dibujarse antes de marcar la vista como completa.
+- solicitar otra generación al acercar, alejar o arrastrar la imagen;
+- limitar el centro solicitado a la zona navegable y omitir vistas de arrastre
+  que no cambian el centro.
 
 También muestra el progreso en texto:
 
@@ -525,10 +528,12 @@ VIEW 1 completa: 4 chunks, 63.7 KiB
 
 ## 15. Qué falta
 
-El canvas muestra una vista fija de 1100 × 650. Los chunks que sobresalen se
-recortan automáticamente; el navegador libera cada bitmap temporal después de
-dibujarlo. Aún faltan los controles de movimiento y zoom, así como la gestión
-individual de chunks durante el desplazamiento.
+El canvas mide 1100 × 650. Los chunks que sobresalen se recortan automáticamente;
+el navegador libera cada bitmap temporal después de dibujarlo. Los botones y la
+rueda cambian entre los niveles de zoom calculados por el servidor. El arrastre
+solicita un centro nuevo al soltar el puntero. Las generaciones anteriores se
+ignoran al recibirlas y se cancelan en el coordinador del servidor. Aún falta
+gestionar individualmente los chunks en el navegador durante el desplazamiento.
 
 ## 16. Archivos principales
 

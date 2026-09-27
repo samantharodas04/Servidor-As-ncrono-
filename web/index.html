@@ -9,7 +9,7 @@
 <body>
 <main>
     <h1>Servidor asíncrono de imágenes</h1>
-    <p>Prueba del transporte binario PAI/1 para vistas por chunks.</p>
+    <p>Selecciona una imagen, acerca la vista y arrastra para explorarla.</p>
     <p><strong>WebSocket:</strong> <span id="connectionStatus">Conectando...</span></p>
     <p><strong>Catálogo:</strong> <span id="catalogStatus">Pendiente</span></p>
     <p>
@@ -19,11 +19,14 @@
     <p id="imageInfo">Ninguna imagen seleccionada</p>
     <p>
         <button id="sendValidView" disabled>Mostrar imagen</button>
+        <button id="zoomOut" disabled aria-label="Alejar">−</button>
+        <span id="zoomStatus" aria-live="polite">Zoom: sin imagen</span>
+        <button id="zoomIn" disabled aria-label="Acercar">+</button>
         <button id="sendInvalidView" disabled>Enviar VIEW inválido</button>
     </p>
     <p><strong>Última acción:</strong> <span id="viewStatus">Ninguna</span></p>
     <canvas id="imageCanvas" width="1100" height="650" aria-label="Vista de la imagen seleccionada"></canvas>
-    <p>Los JPEG recibidos se dibujan en el canvas. Movimiento y zoom interactivo quedan para después.</p>
+    <p>Arrastra la imagen para moverte. Usa los botones o la rueda del ratón para cambiar de resolución.</p>
 </main>
 <script src="/app.js"></script>
 </body>

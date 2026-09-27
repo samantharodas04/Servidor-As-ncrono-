@@ -24,6 +24,12 @@ canvas {
     height: auto;
     background: #e5e7eb;
     border: 1px solid #d1d5db;
+    cursor: grab;
+    touch-action: none;
+}
+
+canvas.dragging {
+    cursor: grabbing;
 }
 
 @media (max-width: 1180px) {

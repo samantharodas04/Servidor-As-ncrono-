@@ -33,6 +33,9 @@ const statusElement = document.getElementById("connectionStatus");
 const viewStatusElement = document.getElementById("viewStatus");
 const sendValidButton = document.getElementById("sendValidView");
 const sendInvalidButton = document.getElementById("sendInvalidView");
+const zoomOutButton = document.getElementById("zoomOut");
+const zoomInButton = document.getElementById("zoomIn");
+const zoomStatusElement = document.getElementById("zoomStatus");
 const imageSelect = document.getElementById("imageSelect");
 const imageInfoElement = document.getElementById("imageInfo");
 const catalogStatusElement = document.getElementById("catalogStatus");
@@ -47,6 +50,9 @@ const catalog = new Map();
 let generationId = 1n;
 let latestRequestedGenerationId = 0n;
 let activeView = null;
+let currentRequest = null;
+let dragStart = null;
+let wheelTimer = null;
 
 // Paso 3
 function createPaiMessage(opcode, payloadBytes = 0) {
@@ -262,19 +268,83 @@ function encodeView(request) {
     return buffer;
 }
 
-function createExampleView() {
-    const image = catalog.get(imageSelect.value);
-    if (!image) return null;
+function zoomScales(image) {
+    const base = Math.min(1, imageCanvas.width / image.width,
+        imageCanvas.height / image.height);
+    const scales = [];
+    let scale = base;
+    for (let index = 0; index < 64; index++) {
+        scales.push(scale);
+        if (scale >= 1 - 1e-12) break;
+        scale = Math.min(1, scale * 2);
+    }
+    return scales;
+}
 
+function initialView(image) {
     return {
-        generationId: generationId++,
         imageId: image.id,
         zoomIndex: 0,
         centerX: Math.floor(image.width / 2),
         centerY: Math.floor(image.height / 2),
-        viewportWidth: 1100,
-        viewportHeight: 650
+        viewportWidth: imageCanvas.width,
+        viewportHeight: imageCanvas.height
     };
+}
+
+function updateNavigation() {
+    const image = catalog.get(imageSelect.value);
+    const levels = image ? zoomScales(image) : [];
+    const zoomIndex = currentRequest?.imageId === image?.id
+        ? currentRequest.zoomIndex : 0;
+    const ready = socket.readyState === WebSocket.OPEN && currentRequest !== null;
+    zoomOutButton.disabled = !ready || zoomIndex === 0;
+    zoomInButton.disabled = !ready || zoomIndex >= levels.length - 1;
+    zoomStatusElement.textContent = image
+        ? `Zoom ${zoomIndex + 1}/${levels.length}` : "Zoom: sin imagen";
+}
+
+function requestView(view) {
+    if (!requireOpenSocket()) return;
+    const request = {...view, generationId: generationId++};
+    currentRequest = request;
+    latestRequestedGenerationId = request.generationId;
+    activeView = null;
+    socket.send(encodeView(request));
+    updateNavigation();
+    viewStatusElement.textContent =
+        `VIEW ${request.generationId} enviado para ${request.imageId}`;
+}
+
+function changeZoom(direction) {
+    const image = catalog.get(imageSelect.value);
+    if (!image || !currentRequest) return;
+    const nextIndex = Math.max(0, Math.min(zoomScales(image).length - 1,
+        currentRequest.zoomIndex + direction));
+    if (nextIndex === currentRequest.zoomIndex) return;
+    requestView({...currentRequest, zoomIndex: nextIndex});
+}
+
+function moveView(deltaCanvasX, deltaCanvasY) {
+    const image = catalog.get(imageSelect.value);
+    if (!image || !currentRequest || currentRequest.zoomIndex === 0) return;
+    const scale = zoomScales(image)[currentRequest.zoomIndex];
+    const scaleX = Math.max(1, Math.round(image.width * scale)) / image.width;
+    const scaleY = Math.max(1, Math.round(image.height * scale)) / image.height;
+    const centerX = clampVisibleCenter(currentRequest.centerX - deltaCanvasX / scaleX,
+        image.width, imageCanvas.width / scaleX);
+    const centerY = clampVisibleCenter(currentRequest.centerY - deltaCanvasY / scaleY,
+        image.height, imageCanvas.height / scaleY);
+    if (centerX !== currentRequest.centerX || centerY !== currentRequest.centerY) {
+        requestView({...currentRequest, centerX, centerY});
+    }
+}
+
+function clampVisibleCenter(center, imageSize, visibleSize) {
+    if (visibleSize >= imageSize) return Math.floor(imageSize / 2);
+    const half = visibleSize / 2;
+    return Math.max(0, Math.min(imageSize - 1,
+        Math.round(Math.max(half, Math.min(imageSize - half, center)))));
 }
 
 // Paso 6
@@ -294,6 +364,7 @@ function showSelectedImage() {
     imageInfoElement.textContent = image
         ? image.width + " × " + image.height + " píxeles | " + formatBytes(image.sizeBytes)
         : "Ninguna imagen seleccionada";
+    updateNavigation();
 }
 
 function showCatalog(images) {
@@ -442,6 +513,7 @@ socket.addEventListener("close", () => {
     imageSelect.disabled = true;
     sendValidButton.disabled = true;
     sendInvalidButton.disabled = true;
+    updateNavigation();
 });
 
 socket.addEventListener("error", () => {
@@ -449,24 +521,67 @@ socket.addEventListener("error", () => {
 });
 
 // Paso 8
-imageSelect.addEventListener("change", showSelectedImage);
+imageSelect.addEventListener("change", () => {
+    if (wheelTimer !== null) clearTimeout(wheelTimer);
+    wheelTimer = null;
+    const wasViewing = currentRequest !== null;
+    currentRequest = null;
+    activeView = null;
+    latestRequestedGenerationId = 0n;
+    canvasContext.clearRect(0, 0, imageCanvas.width, imageCanvas.height);
+    showSelectedImage();
+    const image = catalog.get(imageSelect.value);
+    if (wasViewing && image) requestView(initialView(image));
+});
 
 sendValidButton.addEventListener("click", () => {
-    if (!requireOpenSocket()) return;
-    const request = createExampleView();
-    if (!request) return;
+    const image = catalog.get(imageSelect.value);
+    if (image) requestView(initialView(image));
+});
 
-    latestRequestedGenerationId = request.generationId;
-    activeView = null;
-    socket.send(encodeView(request));
-    viewStatusElement.textContent =
-        `VIEW ${request.generationId} enviado para ${request.imageId}`;
+zoomOutButton.addEventListener("click", () => changeZoom(-1));
+zoomInButton.addEventListener("click", () => changeZoom(1));
+
+imageCanvas.addEventListener("wheel", (event) => {
+    if (!currentRequest || socket.readyState !== WebSocket.OPEN) return;
+    event.preventDefault();
+    if (wheelTimer !== null) clearTimeout(wheelTimer);
+    const direction = event.deltaY < 0 ? 1 : -1;
+    wheelTimer = setTimeout(() => {
+        wheelTimer = null;
+        changeZoom(direction);
+    }, 150);
+}, {passive: false});
+
+imageCanvas.addEventListener("pointerdown", (event) => {
+    if (!currentRequest || event.button !== 0) return;
+    dragStart = {pointerId: event.pointerId, x: event.clientX, y: event.clientY};
+    imageCanvas.setPointerCapture(event.pointerId);
+    imageCanvas.classList.add("dragging");
+});
+
+imageCanvas.addEventListener("pointerup", (event) => {
+    if (!dragStart || dragStart.pointerId !== event.pointerId) return;
+    const deltaX = event.clientX - dragStart.x;
+    const deltaY = event.clientY - dragStart.y;
+    dragStart = null;
+    imageCanvas.classList.remove("dragging");
+    if (Math.hypot(deltaX, deltaY) < 3) return;
+    const bounds = imageCanvas.getBoundingClientRect();
+    moveView(deltaX * imageCanvas.width / bounds.width,
+        deltaY * imageCanvas.height / bounds.height);
+});
+
+imageCanvas.addEventListener("pointercancel", () => {
+    dragStart = null;
+    imageCanvas.classList.remove("dragging");
 });
 
 sendInvalidButton.addEventListener("click", () => {
     if (!requireOpenSocket()) return;
-    const request = createExampleView();
-    if (!request) return;
+    const image = catalog.get(imageSelect.value);
+    if (!image) return;
+    const request = {...initialView(image), generationId: generationId++};
 
     const invalid = new Uint8Array(encodeView(request));
     invalid[0] ^= 0x01;

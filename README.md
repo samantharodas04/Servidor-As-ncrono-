@@ -29,7 +29,9 @@ El flujo nuevo ya incluye:
 - rechazo de mensajes PAI inválidos sin detener el servidor.
 
 `Main` inicia el servidor y el frontend permite enviar un `VIEW` válido o uno
-inválido. El servidor procesa cada vista, envía sus chunks JPEG y el navegador
+inválido. Los botones `+` y `−`, la rueda y el arrastre sobre el canvas solicitan
+nuevas vistas con zoom o centro distintos. El arrastre envía la petición al
+soltar el puntero. El servidor procesa cada vista, envía sus chunks JPEG y el navegador
 valida la generación, la cantidad de chunks y el total de bytes recibidos.
 Después decodifica los JPEG y los dibuja en un canvas en las posiciones de
 cada chunk.
@@ -78,7 +80,7 @@ src/view/     zoom, regiones, chunks, generaciones y coordinación
 src/worker/   pool limitado de workers
 src/protocol/ codec binario PAI/1 VIEW
 src/server/   servidor HTTP/WebSocket y lectura de frames
-web/          cliente mínimo para probar VIEW
+web/          cliente PAI/1 con canvas, movimiento y zoom
 ```
 
 Los originales se colocan en `images/originals`. `images/processed` no se usa
@@ -96,5 +98,6 @@ binarios PAI se encuentra en [docs/README.md](docs/README.md).
 
 ## Próximo hito
 
-Agregar interacción de movimiento y zoom; por ahora la vista es fija y no
-descarta chunks individualmente.
+Verificar la navegación con imágenes gigantes y mejorar el descarte visual de
+chunks durante movimientos rápidos. El navegador todavía reconstruye cada vista
+en el canvas; no mantiene una caché propia de bitmaps por chunk.
