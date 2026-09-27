@@ -33,8 +33,11 @@ const overviewMarker = document.getElementById("overviewMarker");
 const bitmapCache = new BitmapCache(12 * 1024 * 1024);
 
 const scheme = window.location.protocol === "https:" ? "wss" : "ws";
-const socket = new WebSocket(`${scheme}://${window.location.host}/pai`);
-socket.binaryType = "arraybuffer";
+const socketUrl = `${scheme}://${window.location.host}/pai`;
+const MAX_RECONNECT_ATTEMPTS = 5;
+let socket = null;
+let reconnectTimer = null;
+let reconnectAttempts = 0;
 
 const catalog = new Map();
 let generationId = 1n;
@@ -49,7 +52,7 @@ function updateNavigation() {
     const levels = image ? zoomScales(image) : [];
     const zoomIndex = currentRequest?.imageId === image?.id
         ? currentRequest.zoomIndex : 0;
-    const ready = socket.readyState === WebSocket.OPEN && currentRequest !== null;
+    const ready = socket?.readyState === WebSocket.OPEN && currentRequest !== null;
     zoomOutButton.disabled = !ready || zoomIndex === 0;
     zoomInButton.disabled = !ready || zoomIndex >= levels.length - 1;
     zoomStatusElement.textContent = image
@@ -106,7 +109,7 @@ const minimap = createMinimap({
     getImage: (id) => catalog.get(id),
     getRequest: () => currentRequest,
     getActiveView: () => activeView,
-    socketReady: () => socket.readyState === WebSocket.OPEN,
+    socketReady: () => socket?.readyState === WebSocket.OPEN,
     zoomScales,
     requestView,
     moveView
@@ -156,7 +159,14 @@ function updateCacheStatus() {
 }
 
 function showCatalog(images) {
-    minimap.clear();
+    const selectedId = imageSelect.value;
+    const previousRequest = currentRequest;
+    const previousImage = previousRequest && catalog.get(previousRequest.imageId);
+    const sameImage = previousImage && images.some((image) =>
+        image.id === previousImage.id && image.width === previousImage.width
+        && image.height === previousImage.height
+        && image.sizeBytes === previousImage.sizeBytes);
+    if (!sameImage) minimap.clear();
     bitmapCache.clear();
     updateCacheStatus();
     catalog.clear();
@@ -168,17 +178,35 @@ function showCatalog(images) {
         option.textContent = image.name;
         imageSelect.append(option);
     }
+    if (catalog.has(previousRequest?.imageId)) {
+        imageSelect.value = previousRequest.imageId;
+    } else if (catalog.has(selectedId)) {
+        imageSelect.value = selectedId;
+    }
 
     const hasImages = images.length > 0;
     imageSelect.disabled = !hasImages;
     sendValidButton.disabled = !hasImages;
     sendInvalidButton.disabled = !hasImages;
     catalogStatusElement.textContent = images.length + " imagen(es) disponible(s)";
+    reconnectAttempts = 0;
     showSelectedImage();
+    if (previousRequest) {
+        const image = catalog.get(previousRequest.imageId);
+        if (image) {
+            const sameDimensions = previousImage?.width === image.width
+                && previousImage?.height === image.height;
+            requestView(sameDimensions ? previousRequest : initialView(image));
+        } else {
+            currentRequest = null;
+            viewStatusElement.textContent = "La imagen anterior ya no está disponible";
+            updateNavigation();
+        }
+    }
 }
 
 function requireOpenSocket() {
-    if (socket.readyState !== WebSocket.OPEN) {
+    if (socket?.readyState !== WebSocket.OPEN) {
         viewStatusElement.textContent = "El WebSocket no está conectado";
         return false;
     }
@@ -197,6 +225,8 @@ function receiveViewStart(buffer) {
         imageId: currentRequest.imageId,
         sourceSizeBytes: catalog.get(currentRequest.imageId)?.sizeBytes,
         receivedIndexes: new Set(),
+        drawnIndexes: new Set(),
+        recoveredIndexes: new Set(),
         receivedBytes: 0n,
         drawLanes: [Promise.resolve(), Promise.resolve()],
         nextDrawLane: 0,
@@ -243,9 +273,17 @@ async function drawChunk(view, message) {
 function receiveChunk(buffer) {
     const message = decodeChunk(buffer);
     if (!activeView || message.generationId !== activeView.generationId) return;
-    if (message.index >= activeView.chunkCount
-            || activeView.receivedIndexes.has(message.index)) {
-        throw new Error("CHUNK duplicado o fuera de rango");
+    if (message.index >= activeView.chunkCount) {
+        throw new Error("CHUNK fuera de rango");
+    }
+    if (activeView.receivedIndexes.has(message.index)) {
+        // Un reenvío no altera cantidad ni bytes; repite el ACK si ya se dibujó.
+        activeView.recoveredIndexes.add(message.index);
+        if (activeView.drawnIndexes.has(message.index)
+                && socket.readyState === WebSocket.OPEN) {
+            socket.send(encodeChunkAck(activeView.generationId, message.index));
+        }
+        return;
     }
 
     activeView.receivedIndexes.add(message.index);
@@ -259,6 +297,7 @@ function receiveChunk(buffer) {
         if (activeView !== view || view.drawError) return;
         return drawChunk(view, message).then(() => {
             if (activeView === view && socket.readyState === WebSocket.OPEN) {
+                view.drawnIndexes.add(message.index);
                 socket.send(encodeChunkAck(view.generationId, message.index));
             }
         });
@@ -287,7 +326,9 @@ async function receiveViewEnd(buffer) {
     minimap.capture(view);
     viewStatusElement.textContent =
         `VIEW ${message.generationId} completa: ${message.chunkCount} chunks, `
-        + formatBytes(Number(message.totalImageBytes));
+        + formatBytes(Number(message.totalImageBytes))
+        + (view.recoveredIndexes.size
+            ? ` · ${view.recoveredIndexes.size} recuperado(s)` : "");
 }
 
 function receiveViewError(buffer) {
@@ -297,15 +338,25 @@ function receiveViewError(buffer) {
     viewStatusElement.textContent = `VIEW ${message.generationId}: ${message.message}`;
 }
 
-// 11. El WebSocket distribuye respuestas PAI al catálogo o a la vista activa.
-socket.addEventListener("open", () => {
-    statusElement.textContent = "Conectado: handshake completado";
-    statusElement.parentElement.dataset.state = "connected";
-    catalogStatusElement.textContent = "Solicitando catálogo...";
-    socket.send(encodeListImages());
-});
+// 11. Al recuperar la conexión, el catálogo permite volver a pedir la última vista.
+function scheduleReconnect() {
+    if (reconnectTimer !== null) return;
+    if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+        statusElement.textContent = "Sin conexión; recarga la página para reintentar";
+        viewStatusElement.textContent = "No se pudo recuperar la conexión";
+        return;
+    }
+    const delay = Math.min(500 * 2 ** reconnectAttempts, 8000);
+    reconnectAttempts++;
+    statusElement.textContent = `Desconectado · reintento ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}`;
+    if (currentRequest) viewStatusElement.textContent = "Recuperando la última vista...";
+    reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        connect();
+    }, delay);
+}
 
-socket.addEventListener("message", async (event) => {
+async function receiveSocketMessage(event) {
     let opcode;
     try {
         if (!(event.data instanceof ArrayBuffer)) {
@@ -339,25 +390,44 @@ socket.addEventListener("message", async (event) => {
             viewStatusElement.textContent = "Respuesta VIEW rechazada: " + error.message;
         }
     }
-});
+}
 
-socket.addEventListener("close", () => {
-    activeView = null;
-    minimap.clear();
-    bitmapCache.clear();
-    updateCacheStatus();
-    statusElement.textContent = "Desconectado";
-    statusElement.parentElement.dataset.state = "disconnected";
-    imageSelect.disabled = true;
-    sendValidButton.disabled = true;
-    sendInvalidButton.disabled = true;
-    updateNavigation();
-});
+function connect() {
+    const connection = new WebSocket(socketUrl);
+    connection.binaryType = "arraybuffer";
+    socket = connection;
 
-socket.addEventListener("error", () => {
-    statusElement.textContent = "Error de conexión";
-    statusElement.parentElement.dataset.state = "error";
-});
+    connection.addEventListener("open", () => {
+        if (socket !== connection) return;
+        statusElement.textContent = "Conectado: handshake completado";
+        statusElement.parentElement.dataset.state = "connected";
+        catalogStatusElement.textContent = "Solicitando catálogo...";
+        connection.send(encodeListImages());
+    });
+
+    connection.addEventListener("message", (event) => {
+        if (socket === connection) void receiveSocketMessage(event);
+    });
+
+    connection.addEventListener("close", () => {
+        if (socket !== connection) return;
+        activeView = null;
+        bitmapCache.clear();
+        updateCacheStatus();
+        statusElement.parentElement.dataset.state = "disconnected";
+        imageSelect.disabled = true;
+        sendValidButton.disabled = true;
+        sendInvalidButton.disabled = true;
+        updateNavigation();
+        scheduleReconnect();
+    });
+
+    connection.addEventListener("error", () => {
+        if (socket !== connection) return;
+        statusElement.textContent = "Error de conexión";
+        statusElement.parentElement.dataset.state = "error";
+    });
+}
 
 // 12. Los controles traducen acciones del usuario en nuevas solicitudes VIEW.
 imageSelect.addEventListener("change", () => {
@@ -428,3 +498,5 @@ sendInvalidButton.addEventListener("click", () => {
     socket.send(invalid);
     viewStatusElement.textContent = "VIEW inválido enviado; el servidor debe rechazarlo";
 });
+
+connect();

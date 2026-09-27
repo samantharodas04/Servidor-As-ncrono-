@@ -336,10 +336,9 @@ public final class AsyncHttpServer implements AutoCloseable {
                     @Override
                     public void onChunk(ViewRequest current, int index,
                                         RenderedChunk chunk) throws IOException {
-                        if (isCurrentSession(session, current.generationId())
-                                && session.flow.reserve(current.generationId(), index)
-                                && isCurrentSession(session, current.generationId())) {
-                            session.send(ViewResponseCodec.encodeChunk(current, index, chunk));
+                        if (isCurrentSession(session, current.generationId())) {
+                            session.flow.sendChunk(current.generationId(), index,
+                                    ViewResponseCodec.encodeChunk(current, index, chunk));
                         }
                     }
                 },
@@ -364,6 +363,7 @@ public final class AsyncHttpServer implements AutoCloseable {
             return;
         }
 
+        long ackWaitStarted = System.nanoTime();
         try {
             if (!session.flow.awaitDrained(generationId)
                     || !isCurrentSession(session, generationId)) return;
@@ -372,12 +372,13 @@ public final class AsyncHttpServer implements AutoCloseable {
             printViewFailure(session, result.request(), failure);
             return;
         }
+        long ackWaitMillis = (System.nanoTime() - ackWaitStarted) / 1_000_000L;
 
         System.out.printf(
                 "[VIEW] enviada | generationId=%d | imageId=%s | zoomIndex=%d "
                         + "| region=(%d,%d %dx%d) | chunks=%d | cache=%d "
                         + "| generados=%d | imageBytes=%d | preparar%s=%dms "
-                        + "| chunks%s=%dms | total=%dms%n",
+                        + "| chunks%s=%dms | ackWait=%dms | total=%dms%n",
                 generationId,
                 result.source().id(),
                 result.request().zoomIndex(),
@@ -393,7 +394,8 @@ public final class AsyncHttpServer implements AutoCloseable {
                 result.preparationMillis(),
                 result.individualPreparation() ? "-suma-workers" : "",
                 result.chunkMillis(),
-                result.totalMillis()
+                ackWaitMillis,
+                result.totalMillis() + ackWaitMillis
         );
     }
 
@@ -405,6 +407,7 @@ public final class AsyncHttpServer implements AutoCloseable {
         if (!isCurrentSession(session, request.generationId())) {
             return;
         }
+        session.flow.fail(request.generationId());
         System.err.printf(
                 "[VIEW] fallo | generationId=%d | imageId=%s | motivo=%s%n",
                 request.generationId(),
@@ -567,7 +570,7 @@ public final class AsyncHttpServer implements AutoCloseable {
         private ClientSession(AsynchronousSocketChannel client) {
             this.client = client;
             this.coordinator = ViewCoordinator.usingSharedProcessor(viewProcessor);
-            this.flow = new ViewFlowControl();
+            this.flow = new ViewFlowControl(this::send);
             this.pendingPayloads = new ArrayDeque<>();
         }
 
