@@ -3,7 +3,7 @@ package image;
 import java.io.IOException;
 import java.nio.file.Path;
 
-/** Preparacion explicita de una fuente gigante antes de servir sus vistas. */
+/** Ejecuta make prepare-image fuera de las solicitudes VIEW; conserva el original. */
 public final class ImagePreparationTool {
     private ImagePreparationTool() {
     }

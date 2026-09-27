@@ -126,6 +126,8 @@ binarios PAI se encuentra en [docs/README.md](docs/README.md).
 
 ## Próximo hito
 
-Medir la memoria y los aciertos de caché con un recorrido repetible en Firefox.
-El navegador todavía reconstruye cada vista completa en el canvas y no evita
-que el servidor reenvíe los JPEG cacheados.
+Revisar el enunciado y preparar una demostración reproducible del flujo
+completo. El recorrido de zoom y memoria con Firefox y la prueba de clientes
+simultáneos están registrados en la bitácora, secciones 56 y 57. El navegador
+todavía reconstruye cada vista completa en el canvas y el servidor reenvía los
+JPEG aunque el cliente conserve un bitmap reutilizable.

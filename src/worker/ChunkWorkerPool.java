@@ -15,7 +15,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 
-/** Ejecuta trabajos de chunks usando una cantidad fija y limitada de workers. */
+/** Recorta en paralelo la vista temporal; cada resultado sale como JPEG o PNG. */
 public final class ChunkWorkerPool implements AutoCloseable {
     private final ExecutorService executor;
     private final ChunkRenderer renderer;
@@ -34,7 +34,8 @@ public final class ChunkWorkerPool implements AutoCloseable {
         });
     }
 
-    public List<RenderedChunk> renderAll(Path preparedView, ViewChunkPlan plan, int jpegQuality)
+    public List<RenderedChunk> renderAll(Path preparedView, ViewChunkPlan plan,
+                                         int jpegQuality, boolean png)
             throws IOException {
         List<Future<RenderedChunk>> pending = new ArrayList<>(plan.chunks().size());
         for (PlannedChunk originalChunk : plan.chunks()) {
@@ -45,8 +46,8 @@ public final class ChunkWorkerPool implements AutoCloseable {
                         originalChunk.column(), originalChunk.row()
                 );
                 PlannedChunk localChunk = toPreparedViewChunk(originalChunk, plan);
-                byte[] jpeg = renderer.render(preparedView, localChunk, jpegQuality);
-                return new RenderedChunk(originalChunk, jpeg);
+                byte[] bytes = renderer.render(preparedView, localChunk, jpegQuality, png);
+                return new RenderedChunk(originalChunk, bytes, png);
             }));
         }
 

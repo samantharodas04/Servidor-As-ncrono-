@@ -41,7 +41,7 @@ public record ViewResult(
         }
     }
 
-    public long totalJpegBytes() {
+    public long totalChunkBytes() {
         return chunks.stream().mapToLong(RenderedChunk::byteLength).sum();
     }
 }

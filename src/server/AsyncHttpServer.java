@@ -264,7 +264,7 @@ public final class AsyncHttpServer implements AutoCloseable {
     }
 
     /** Devuelve false cuando el frame cierra o invalida esta conexion. */
-    // 5. Decodifica LIST_IMAGES o VIEW y envía la vista al coordinador del cliente.
+    // 5. Decodifica LIST_IMAGES o VIEW; VIEW sigue en ViewCoordinator.submit (paso 6).
     private boolean handleWebSocketFrame(
             AsynchronousSocketChannel client,
             WebSocketUtil.DecodedFrame frame
@@ -323,7 +323,7 @@ public final class AsyncHttpServer implements AutoCloseable {
         return session;
     }
 
-    // 7. Envía START, cada JPEG y END solo si la generación sigue vigente.
+    // 7. Envia START, cada chunk JPEG/PNG y END solo si la generacion sigue vigente.
     private void sendViewResult(ClientSession session, ViewResult result) {
         long generationId = result.request().generationId();
         if (sessions.get(session.client) != session
@@ -350,7 +350,7 @@ public final class AsyncHttpServer implements AutoCloseable {
         System.out.printf(
                 "[VIEW] enviada | generationId=%d | imageId=%s | zoomIndex=%d "
                         + "| region=(%d,%d %dx%d) | chunks=%d | cache=%d "
-                        + "| generados=%d | jpegBytes=%d | preparar=%dms "
+                        + "| generados=%d | imageBytes=%d | preparar=%dms "
                         + "| chunks=%dms | total=%dms%n",
                 generationId,
                 result.source().id(),
@@ -362,7 +362,7 @@ public final class AsyncHttpServer implements AutoCloseable {
                 result.chunks().size(),
                 result.cacheHits(),
                 result.generatedChunks(),
-                result.totalJpegBytes(),
+                result.totalChunkBytes(),
                 result.preparationMillis(),
                 result.chunkMillis(),
                 result.totalMillis()
@@ -429,6 +429,7 @@ public final class AsyncHttpServer implements AutoCloseable {
         String head = "HTTP/1.1 " + status + " " + reason + "\r\n"
                 + "Content-Type: " + contentType + "\r\n"
                 + "Content-Length: " + body.length + "\r\n"
+                + "Cache-Control: no-store\r\n"
                 + "Connection: close\r\n"
                 + "\r\n";
         byte[] header = head.getBytes(StandardCharsets.ISO_8859_1);

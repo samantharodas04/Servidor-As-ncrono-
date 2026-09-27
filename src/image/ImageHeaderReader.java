@@ -6,6 +6,7 @@ import javax.imageio.stream.ImageInputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.util.Locale;
 import java.util.Iterator;
 import java.util.concurrent.TimeUnit;
 
@@ -14,6 +15,10 @@ public final class ImageHeaderReader {
     private static final long VIPS_TIMEOUT_SECONDS = 30;
 
     public ImageDimensions read(Path image) throws IOException {
+        // PSB necesita su lector propio; ImageIO y libvips no abren este archivo gigante.
+        if (image.getFileName().toString().toLowerCase(Locale.ROOT).endsWith(".psb")) {
+            return RawPsbSource.open(image).dimensions();
+        }
         IOException imageIoFailure = null;
         try {
             ImageDimensions dimensions = readWithImageIo(image);

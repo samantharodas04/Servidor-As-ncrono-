@@ -7,7 +7,11 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 
-/** Inicia el servidor HTTP/WebSocket del proyecto. */
+/**
+ * Punto de entrada. Recorrido de VIEW: AsyncHttpServer -> ViewProcessor ->
+ * PreparedSourceStore -> VipsViewPreparer -> ChunkWorkerPool -> ViewResponseCodec.
+ * El navegador recibe el resultado en web/app.js.
+ */
 public final class Main {
     private static final int DEFAULT_PORT = 8080;
     private static final Path WEB_ROOT = Path.of("web");
@@ -17,11 +21,11 @@ public final class Main {
     }
 
     public static void main(String[] args) throws IOException {
-        // 1. Lee el puerto y descubre los originales disponibles.
+        // 1. Lee el puerto y solo los encabezados de images/originals; no carga los pixeles.
         int port = readPort(args);
         List<ImageSource> images = new ImageCatalog(ORIGINALS_ROOT).discover();
 
-        // 2. Crea el servidor; cada cliente tendrá su propio coordinador de vistas.
+        // 2. Crea HTTP + WebSocket; los derivados de images/processed se eligen al pedir VIEW.
         AsyncHttpServer server = new AsyncHttpServer(port, WEB_ROOT, images);
         CountDownLatch stopped = new CountDownLatch(1);
 

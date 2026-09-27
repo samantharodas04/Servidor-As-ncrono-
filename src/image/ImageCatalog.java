@@ -10,7 +10,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 
-/** Descubre archivos originales y lee solamente sus encabezados. */
+/** Cataloga images/originals; cada ID siempre identifica el archivo original. */
 public final class ImageCatalog {
     private static final Set<String> SUPPORTED_EXTENSIONS = Set.of(
             "jpg", "jpeg", "png", "tif", "tiff", "psb", "webp", "avif"
@@ -25,6 +25,7 @@ public final class ImageCatalog {
     }
 
     public List<ImageSource> discover() throws IOException {
+        // Al iniciar, solo se leen dimensiones, tamano y fecha. Los pixeles llegan con VIEW.
         Files.createDirectories(originalsDirectory);
 
         List<Path> files;

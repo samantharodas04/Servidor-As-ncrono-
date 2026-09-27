@@ -10,7 +10,7 @@ import java.nio.file.Path;
 import java.util.Locale;
 import java.util.concurrent.TimeUnit;
 
-/** Abre el original una vez y prepara el rectangulo de tiles visibles. */
+/** Crea una vista temporal pequena desde la fuente que eligio PreparedSourceStore. */
 public final class VipsViewPreparer {
     private static final long TIMEOUT_SECONDS = 60;
     private static final long MAX_VIEW_PIXELS = 16L * 1024L * 1024L;
@@ -43,6 +43,27 @@ public final class VipsViewPreparer {
                 normalizedSource, stablePlan.scaleX() / sourceRatioX,
                 stablePlan.scaleY() / sourceRatioY
         );
+        // Solo sin BigTIFF: el PSB crudo produce el rectangulo visible en un PPM temporal.
+        if (normalizedSource.getFileName().toString().toLowerCase(Locale.ROOT)
+                .endsWith(".psb")) {
+            Path ppm = Files.createTempFile("prepared-psb-view-", ".ppm");
+            boolean completedPsb = false;
+            try {
+                RawPsbSource.open(normalizedSource).writePpm(
+                        ppm, chunkPlan.renderedWidth(), chunkPlan.renderedHeight(),
+                        stablePlan.sourceOriginX(), stablePlan.sourceOriginY(),
+                        stablePlan.scaleX(), stablePlan.scaleY()
+                );
+                completedPsb = true;
+                return new PreparedView(ppm, chunkPlan.renderedWidth(),
+                        chunkPlan.renderedHeight());
+            } finally {
+                if (!completedPsb) {
+                    Files.deleteIfExists(ppm);
+                }
+            }
+        }
+        // JPEG, PNG o BigTIFF: libvips transforma la region en una vista .v temporal.
         Path preparedPath = Files.createTempFile("prepared-view-", ".v");
         boolean completed = false;
         try {
@@ -101,7 +122,7 @@ public final class VipsViewPreparer {
                 output.toString(),
                 matrix,
                 "--interpolate=" + (stablePlan.scaleX() > 1.0
-                        || stablePlan.scaleY() > 1.0 ? "bicubic" : "bilinear"),
+                        || stablePlan.scaleY() > 1.0 ? "nohalo" : "bilinear"),
                 "--idx=" + (-decoderX),
                 "--idy=" + (-decoderY),
                 "--oarea=0 0 " + chunkPlan.renderedWidth()

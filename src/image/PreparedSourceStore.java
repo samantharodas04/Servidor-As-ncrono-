@@ -7,10 +7,7 @@ import java.nio.file.StandardCopyOption;
 import java.util.Locale;
 import java.util.concurrent.TimeUnit;
 
-/**
- * Mantiene derivados opcionales de un original, sin crear una piramide de tiles.
- * El original sigue siendo la identidad publica y la clave de la cache.
- */
+/** Elige una fuente de lectura; el ID y la version siempre pertenecen al original. */
 public final class PreparedSourceStore {
     private static final long DIRECT_PIXEL_LIMIT = 100_000_000L;
     private static final int OVERVIEW_MAX_EDGE = 4096;
@@ -25,14 +22,12 @@ public final class PreparedSourceStore {
 
     public ResolvedSource resolve(ImageSource original, double scaleX, double scaleY)
             throws IOException {
-        if (isJpeg(original.path())) {
-            return new ResolvedSource(original.path(), 1.0, 1.0);
-        }
         if (!Double.isFinite(scaleX) || !Double.isFinite(scaleY)
                 || scaleX <= 0 || scaleY <= 0) {
             throw new IllegalArgumentException("La escala de la vista debe ser positiva");
         }
 
+        // Zoom lejano: usa el JPEG pequeno de images/processed, si cubre esa escala.
         Path overview = overviewPath(original);
         if (Files.isRegularFile(overview)) {
             ImageDimensions dimensions = headerReader.read(overview);
@@ -46,6 +41,7 @@ public final class PreparedSourceStore {
             }
         }
 
+        // Zoom detallado: lee regiones del BigTIFF preparado a resolucion original.
         Path tiled = tiledPath(original);
         if (Files.isRegularFile(tiled)) {
             ImageDimensions dimensions = headerReader.read(tiled);
@@ -54,6 +50,11 @@ public final class PreparedSourceStore {
                 throw new IOException("Fuente mosaico invalida: " + tiled.getFileName());
             }
             return new ResolvedSource(tiled, 1.0, 1.0);
+        }
+
+        // Respaldo sin derivados: JPEG se decodifica mas lento; PSB lee solo la region.
+        if (isJpeg(original.path()) || isPsb(original.path())) {
+            return new ResolvedSource(original.path(), 1.0, 1.0);
         }
 
         long pixels = (long) original.width() * original.height();
@@ -66,10 +67,14 @@ public final class PreparedSourceStore {
         return new ResolvedSource(original.path(), 1.0, 1.0);
     }
 
-    /** Prepara primero la vista general y luego una fuente mosaico de resolucion completa. */
+    /** make prepare-image: genera derivados una vez; VIEW nunca llama este metodo. */
     public void prepare(ImageSource original) throws IOException {
         prepareOverview(original);
-        if (isJpeg(original.path())) {
+        if (isPsb(original.path())) {
+            Path tiledPsb = tiledPath(original);
+            if (!Files.isRegularFile(tiledPsb)) {
+                buildPsbTiled(original, tiledPsb);
+            }
             return;
         }
         Path tiled = tiledPath(original);
@@ -87,24 +92,23 @@ public final class PreparedSourceStore {
         }
     }
 
-    /** Suficiente para la vista general; el zoom detallado necesita ademas el BigTIFF. */
+    /** make prepare-overview: genera solo el JPEG pequeno para zoom lejano. */
     public void prepareOverview(ImageSource original) throws IOException {
-        if (isJpeg(original.path())) {
-            System.out.println("JPEG usa reduccion al abrir; no necesita preparacion: "
-                    + original.fileName());
-            return;
-        }
         Files.createDirectories(directory);
 
         Path overview = overviewPath(original);
         if (!Files.isRegularFile(overview)) {
             System.out.println("Preparando vista general: " + original.fileName());
-            build(original, overview, ".jpg", new String[] {
-                    "vipsthumbnail", "--vips-concurrency=2",
-                    "--size=" + OVERVIEW_MAX_EDGE,
-                    "--output=%OUTPUT%",
-                    original.path().toString()
-            });
+            if (isPsb(original.path())) {
+                buildPsbOverview(original, overview);
+            } else {
+                build(original, overview, ".jpg", new String[] {
+                        "vipsthumbnail", "--vips-concurrency=2",
+                        "--size=" + OVERVIEW_MAX_EDGE,
+                        "--output=%OUTPUT%",
+                        original.path().toString()
+                });
+            }
             System.out.println("Vista general lista: " + overview);
         } else {
             System.out.println("Vista general existente: " + overview);
@@ -127,6 +131,48 @@ public final class PreparedSourceStore {
     private boolean isJpeg(Path source) {
         String name = source.getFileName().toString().toLowerCase(Locale.ROOT);
         return name.endsWith(".jpg") || name.endsWith(".jpeg");
+    }
+
+    private boolean isPsb(Path source) {
+        return source.getFileName().toString().toLowerCase(Locale.ROOT).endsWith(".psb");
+    }
+
+    private void buildPsbOverview(ImageSource original, Path target) throws IOException {
+        Path ppm = Files.createTempFile(directory, "preparing-psb-", ".ppm");
+        try {
+            double ratio = Math.min((double) OVERVIEW_MAX_EDGE / original.width(),
+                    (double) OVERVIEW_MAX_EDGE / original.height());
+            int width = Math.max(1, (int) Math.round(original.width() * ratio));
+            int height = Math.max(1, (int) Math.round(original.height() * ratio));
+            RawPsbSource.open(original.path()).writePpm(ppm, width, height,
+                    0, 0, (double) width / original.width(),
+                    (double) height / original.height());
+            build(original, target, ".jpg", new String[] {
+                    "vips", "--vips-concurrency=2", "jpegsave", ppm.toString(),
+                    "%OUTPUT%", "--Q=90"
+            });
+        } finally {
+            Files.deleteIfExists(ppm);
+        }
+    }
+
+    private void buildPsbTiled(ImageSource original, Path target) throws IOException {
+        // El PSB RGB guarda R, G y B por separado: se intercalan en un PPM temporal.
+        Path ppm = Files.createTempFile(directory, "preparing-psb-full-", ".ppm");
+        try {
+            System.out.println("Intercalando PSB en disco para BigTIFF: "
+                    + original.fileName());
+            RawPsbSource.open(original.path()).writeFullPpm(ppm);
+            System.out.println("Preparando BigTIFF mosaico del PSB: " + original.fileName());
+            build(original, target, ".tif", new String[] {
+                    "vips", "--vips-concurrency=2", "tiffsave", ppm.toString(),
+                    "%OUTPUT%", "--tile", "--tile-width=512", "--tile-height=512",
+                    "--bigtiff", "--compression=deflate"
+            });
+            System.out.println("BigTIFF mosaico listo: " + target);
+        } finally {
+            Files.deleteIfExists(ppm);
+        }
     }
 
     private void build(ImageSource original, Path target, String suffix, String[] command)

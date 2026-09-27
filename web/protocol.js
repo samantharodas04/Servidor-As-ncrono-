@@ -1,6 +1,6 @@
 "use strict";
 
-// Formato binario PAI/1: validar antes de entregar datos al visor.
+// Formato PAI/1: CHUNK(5) lleva JPEG y CHUNK_PNG(7) lleva PNG.
 const PaiProtocol = Object.freeze({
     NAME: "PAI",
     VERSION: 1
@@ -12,13 +12,14 @@ const PaiOpcode = Object.freeze({
     IMAGE_LIST: 3,
     VIEW_START: 4,
     CHUNK: 5,
-    VIEW_END: 6
+    VIEW_END: 6,
+    CHUNK_PNG: 7
 });
 
 const PaiLimits = Object.freeze({
     MAX_IMAGES: 1024,
     MAX_CHUNKS_PER_VIEW: 4096,
-    MAX_JPEG_BYTES: 8 * 1024 * 1024
+    MAX_CHUNK_BYTES: 8 * 1024 * 1024
 });
 
 const PAI_MAGIC = new TextEncoder().encode(PaiProtocol.NAME);
@@ -162,7 +163,11 @@ function decodeViewStart(buffer) {
 }
 
 function decodeChunk(buffer) {
-    const view = requirePaiMessage(buffer, PaiOpcode.CHUNK);
+    const opcode = readPaiOpcode(buffer);
+    if (opcode !== PaiOpcode.CHUNK && opcode !== PaiOpcode.CHUNK_PNG) {
+        throw new Error("Operacion CHUNK inesperada");
+    }
+    const view = new DataView(buffer);
     if (view.byteLength < CHUNK_METADATA_BYTES) {
         throw new Error("CHUNK incompleto");
     }
@@ -184,20 +189,25 @@ function decodeChunk(buffer) {
     offset += 4;
     const height = view.getUint32(offset);
     offset += 4;
-    const jpegBytes = view.getUint32(offset);
+    const imageBytes = view.getUint32(offset);
     offset += 4;
 
-    if (generationId < 1n || width < 1 || height < 1 || jpegBytes < 4
-            || jpegBytes > PaiLimits.MAX_JPEG_BYTES
-            || offset + jpegBytes !== view.byteLength) {
+    if (generationId < 1n || width < 1 || height < 1 || imageBytes < 8
+            || imageBytes > PaiLimits.MAX_CHUNK_BYTES
+            || offset + imageBytes !== view.byteLength) {
         throw new Error("CHUNK contiene valores invalidos");
     }
-    const jpeg = new Uint8Array(buffer, offset, jpegBytes);
-    if (jpeg[0] !== 0xff || jpeg[1] !== 0xd8
-            || jpeg[jpeg.length - 2] !== 0xff || jpeg[jpeg.length - 1] !== 0xd9) {
-        throw new Error("CHUNK no contiene un JPEG valido");
+    const image = new Uint8Array(buffer, offset, imageBytes);
+    const png = opcode === PaiOpcode.CHUNK_PNG;
+    if (png ? !(image[0] === 137 && image[1] === 80 && image[2] === 78
+            && image[3] === 71 && image[4] === 13 && image[5] === 10
+            && image[6] === 26 && image[7] === 10)
+            : !(image[0] === 0xff && image[1] === 0xd8
+            && image[image.length - 2] === 0xff && image[image.length - 1] === 0xd9)) {
+        throw new Error("CHUNK no contiene una imagen valida");
     }
-    return {generationId, index, column, row, canvasX, canvasY, width, height, jpegBytes, jpeg};
+    return {generationId, index, column, row, canvasX, canvasY, width, height,
+        imageBytes, image, png};
 }
 
 function decodeViewEnd(buffer) {
@@ -208,7 +218,7 @@ function decodeViewEnd(buffer) {
     return {
         generationId: view.getBigUint64(PAI_HEADER_BYTES),
         chunkCount: view.getUint32(PAI_HEADER_BYTES + 8),
-        totalJpegBytes: view.getBigUint64(PAI_HEADER_BYTES + 12)
+        totalImageBytes: view.getBigUint64(PAI_HEADER_BYTES + 12)
     };
 }
 

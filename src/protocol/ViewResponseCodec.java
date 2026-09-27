@@ -8,7 +8,7 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.Objects;
 
-/** Codifica la secuencia VIEW_START, CHUNK y VIEW_END enviada al navegador. */
+/** Codifica START, chunks JPEG/PNG y END; el opcode indica el formato del chunk. */
 public final class ViewResponseCodec {
     public static final int VIEW_START_BYTES = PaiProtocol.HEADER_BYTES
             + Long.BYTES + (Integer.BYTES * 8);
@@ -42,7 +42,7 @@ public final class ViewResponseCodec {
 
     /**
      * generationId(8), indice(4), columna/fila(8), posicion canvas(8),
-     * dimensiones de salida(8), longitud JPEG(4) y JPEG(variable).
+     * dimensiones de salida(8), longitud(4) e imagen JPEG o PNG(variable).
      */
     public static byte[] encodeChunk(ViewResult result, int chunkIndex) {
         Objects.requireNonNull(result, "result");
@@ -52,9 +52,9 @@ public final class ViewResponseCodec {
 
         RenderedChunk rendered = result.chunks().get(chunkIndex);
         PlannedChunk chunk = rendered.chunk();
-        byte[] jpeg = rendered.jpeg();
-        ByteBuffer output = buffer(CHUNK_METADATA_BYTES + jpeg.length);
-        PaiProtocol.putHeader(output, PaiOpcode.CHUNK);
+        byte[] bytes = rendered.bytes();
+        ByteBuffer output = buffer(CHUNK_METADATA_BYTES + bytes.length);
+        PaiProtocol.putHeader(output, rendered.png() ? PaiOpcode.CHUNK_PNG : PaiOpcode.CHUNK);
         output.putLong(result.request().generationId());
         output.putInt(chunkIndex);
         output.putInt(chunk.column());
@@ -63,19 +63,19 @@ public final class ViewResponseCodec {
         output.putInt(chunk.canvasY());
         output.putInt(chunk.outputWidth());
         output.putInt(chunk.outputHeight());
-        output.putInt(jpeg.length);
-        output.put(jpeg);
+        output.putInt(bytes.length);
+        output.put(bytes);
         return output.array();
     }
 
-    /** generationId(8), cantidad de chunks(4) y bytes JPEG totales(8). */
+    /** generationId(8), cantidad de chunks(4) y bytes de imagen totales(8). */
     public static byte[] encodeViewEnd(ViewResult result) {
         Objects.requireNonNull(result, "result");
         ByteBuffer output = buffer(VIEW_END_BYTES);
         PaiProtocol.putHeader(output, PaiOpcode.VIEW_END);
         output.putLong(result.request().generationId());
         output.putInt(result.chunks().size());
-        output.putLong(result.totalJpegBytes());
+        output.putLong(result.totalChunkBytes());
         return output.array();
     }
 

@@ -41,7 +41,7 @@ public final class ViewCoordinator implements AutoCloseable {
         return submit(request, result -> { }, failure -> { });
     }
 
-    /** 6. Cancela la generación anterior y procesa la nueva fuera del hilo de red. */
+    /** 6. Recibe VIEW desde AsyncHttpServer (paso 5), cancela la anterior y llama al procesador. */
     public synchronized Future<ViewResult> submit(
             ViewRequest request,
             Consumer<ViewResult> onSuccess,

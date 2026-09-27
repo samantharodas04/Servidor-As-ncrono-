@@ -8,12 +8,13 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.TimeUnit;
 
-/** Recorta un chunk JPEG desde una vista pequena previamente preparada. */
+/** Recorta un chunk desde una vista pequena previamente preparada. */
 public final class VipsChunkRenderer implements ChunkRenderer {
     private static final long TIMEOUT_SECONDS = 15;
-    private static final long MAX_JPEG_BYTES = 8L * 1024L * 1024L;
+    private static final long MAX_CHUNK_BYTES = 8L * 1024L * 1024L;
     @Override
-    public byte[] render(Path source, PlannedChunk chunk, int jpegQuality) throws IOException {
+    public byte[] render(Path source, PlannedChunk chunk, int jpegQuality, boolean png)
+            throws IOException {
         if (jpegQuality < 1 || jpegQuality > 100) {
             throw new IllegalArgumentException("Calidad JPEG fuera de rango");
         }
@@ -22,26 +23,30 @@ public final class VipsChunkRenderer implements ChunkRenderer {
             throw new IOException("La vista preparada no existe");
         }
 
-        Path temporaryJpeg = Files.createTempFile("image-chunk-", ".jpg");
+        // /tmp solo guarda este chunk mientras libvips lo codifica; se borra al leerlo.
+        Path temporaryImage = Files.createTempFile("image-chunk-", png ? ".png" : ".jpg");
         try {
-            runVips(normalizedSource, temporaryJpeg, chunk, jpegQuality);
+            runVips(normalizedSource, temporaryImage, chunk, jpegQuality, png);
 
-            long jpegSize = Files.size(temporaryJpeg);
-            if (jpegSize <= 0 || jpegSize > MAX_JPEG_BYTES) {
-                throw new IOException("Tamano JPEG fuera del limite: " + jpegSize + " bytes");
+            long imageSize = Files.size(temporaryImage);
+            if (imageSize <= 0 || imageSize > MAX_CHUNK_BYTES) {
+                throw new IOException("Tamano de chunk fuera del limite: " + imageSize + " bytes");
             }
 
-            byte[] jpeg = Files.readAllBytes(temporaryJpeg);
-            validateJpeg(jpeg);
-            return jpeg;
+            byte[] bytes = Files.readAllBytes(temporaryImage);
+            if (png) validatePng(bytes);
+            else validateJpeg(bytes);
+            return bytes;
         } finally {
-            Files.deleteIfExists(temporaryJpeg);
+            Files.deleteIfExists(temporaryImage);
         }
     }
 
-    private void runVips(Path source, Path output, PlannedChunk chunk, int jpegQuality)
+    private void runVips(Path source, Path output, PlannedChunk chunk, int jpegQuality,
+                         boolean png)
             throws IOException {
-        String outputWithOptions = output + "[Q=" + jpegQuality + ",optimize-coding]";
+        String outputWithOptions = png ? output + "[compression=6]"
+                : output + "[Q=" + jpegQuality + ",optimize-coding]";
         Process process = new ProcessBuilder(
                 "vips",
                 "crop",
@@ -82,6 +87,18 @@ public final class VipsChunkRenderer implements ChunkRenderer {
                 || (jpeg[jpeg.length - 2] & 0xFF) != 0xFF
                 || (jpeg[jpeg.length - 1] & 0xFF) != 0xD9) {
             throw new IOException("libvips no produjo un JPEG valido");
+        }
+    }
+
+    private void validatePng(byte[] png) throws IOException {
+        byte[] signature = {(byte) 137, 80, 78, 71, 13, 10, 26, 10};
+        if (png.length < signature.length) {
+            throw new IOException("libvips no produjo un PNG valido");
+        }
+        for (int i = 0; i < signature.length; i++) {
+            if (png[i] != signature[i]) {
+                throw new IOException("libvips no produjo un PNG valido");
+            }
         }
     }
 }

@@ -18,7 +18,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-/** Convierte una ViewRequest en chunks JPEG estables sin ocuparse de la interfaz. */
+/** Convierte VIEW en chunks JPEG o PNG; no conoce el navegador ni el WebSocket. */
 public final class ViewProcessor implements AutoCloseable {
     private static final long DEFAULT_CACHE_BYTES = 32L * 1024L * 1024L;
 
@@ -41,7 +41,7 @@ public final class ViewProcessor implements AutoCloseable {
     }
 
     public ViewResult render(ViewRequest request) throws IOException {
-        // Planifica la región y consulta la caché antes de preparar el original.
+        // Dentro del paso 6: calcula zoom/chunks y consulta la cache antes de abrir pixeles.
         long startedAt = System.nanoTime();
         ImageSource source = findSource(request.imageId());
         ensureSourceUnchanged(source);
@@ -57,15 +57,17 @@ public final class ViewProcessor implements AutoCloseable {
                 request.chunkSize()
         );
         ViewChunkPlan completePlan = stablePlan.chunkPlan();
+        // Antes de 1:1 envia JPEG; desde 1:1, PNG evita otra perdida de detalle.
+        boolean losslessChunks = zoomLevel.scale() >= 1.0;
 
         Map<PlannedChunk, RenderedChunk> available = new LinkedHashMap<>();
         List<PlannedChunk> missing = new ArrayList<>();
         for (PlannedChunk chunk : completePlan.chunks()) {
-            byte[] cachedJpeg = cache.get(cacheKey(source, request, stablePlan, chunk));
-            if (cachedJpeg == null) {
+            byte[] cachedBytes = cache.get(cacheKey(source, request, stablePlan, chunk));
+            if (cachedBytes == null) {
                 missing.add(chunk);
             } else {
-                available.put(chunk, new RenderedChunk(chunk, cachedJpeg));
+                available.put(chunk, new RenderedChunk(chunk, cachedBytes, losslessChunks));
             }
         }
 
@@ -73,7 +75,7 @@ public final class ViewProcessor implements AutoCloseable {
         long preparationMillis = 0;
         long chunkMillis = 0;
         if (!missing.isEmpty()) {
-            // Libvips y los workers generan únicamente los chunks faltantes.
+            // Selecciona overview, BigTIFF u original y prepara solo el area faltante.
             ensureNotCancelled();
             StableChunkPlan generationPlan = ChunkPreparationPlanner.forMissingChunks(
                     stablePlan, missing
@@ -94,9 +96,10 @@ public final class ViewProcessor implements AutoCloseable {
                 preparationMillis = preparationNanos / 1_000_000L;
                 ensureNotCancelled();
                 long chunksStartedAt = System.nanoTime();
+                // Los workers recortan y codifican los chunks visibles, no la imagen entera.
                 generated = workers.renderAll(
                         preparedView.path(), generationPlan.chunkPlan(),
-                        zoomLevel.scale() > 1.0 ? 92 : 85
+                        zoomLevel.scale() > 1.0 ? 92 : 85, losslessChunks
                 );
                 chunkNanos = System.nanoTime() - chunksStartedAt;
                 chunkMillis = chunkNanos / 1_000_000L;
@@ -110,7 +113,7 @@ public final class ViewProcessor implements AutoCloseable {
                 available.put(rendered.chunk(), rendered);
                 completedBatch.put(
                         cacheKey(source, request, stablePlan, rendered.chunk()),
-                        rendered.jpeg()
+                        rendered.bytes()
                 );
             }
             double costMillisPerChunk = Math.max(0.001,

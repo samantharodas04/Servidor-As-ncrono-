@@ -57,7 +57,8 @@ function updateNavigation() {
 }
 
 function requestView(view) {
-    // Cada acción de navegación invalida la generación anterior.
+    // Envia ID, zoom, centro y tamano; el archivo permanece en el servidor.
+    // Cada accion de navegacion invalida la generacion anterior.
     if (!requireOpenSocket()) return;
     const request = {...view, generationId: generationId++};
     currentRequest = request;
@@ -207,6 +208,7 @@ function receiveViewStart(buffer) {
 
 async function drawChunk(view, message) {
     if (activeView !== view) return;
+    // Reutiliza el bitmap si existe; si no, decodifica el JPEG o PNG recibido.
     const key = JSON.stringify([
         view.imageId, view.sourceSizeBytes, view.zoomIndex,
         view.viewportWidth, view.viewportHeight,
@@ -220,11 +222,12 @@ async function drawChunk(view, message) {
     }
 
     const started = performance.now();
-    const bitmap = await createImageBitmap(new Blob([message.jpeg], {type: "image/jpeg"}));
+    const bitmap = await createImageBitmap(new Blob([message.image],
+        {type: message.png ? "image/png" : "image/jpeg"}));
     let retained = false;
     try {
         if (bitmap.width !== message.width || bitmap.height !== message.height) {
-            throw new Error("El tamaño JPEG no coincide con CHUNK");
+            throw new Error("El tamaño de imagen no coincide con CHUNK");
         }
         if (activeView === view) {
             canvasContext.drawImage(bitmap, message.canvasX, message.canvasY);
@@ -245,7 +248,7 @@ function receiveChunk(buffer) {
     }
 
     activeView.receivedIndexes.add(message.index);
-    activeView.receivedBytes += BigInt(message.jpegBytes);
+    activeView.receivedBytes += BigInt(message.imageBytes);
     viewStatusElement.textContent =
         `VIEW ${message.generationId}: ${activeView.receivedIndexes.size}/${activeView.chunkCount} chunks`;
 
@@ -269,7 +272,7 @@ async function receiveViewEnd(buffer) {
     const view = activeView;
     if (message.chunkCount !== view.chunkCount
             || view.receivedIndexes.size !== view.chunkCount
-            || message.totalJpegBytes !== view.receivedBytes) {
+            || message.totalImageBytes !== view.receivedBytes) {
         throw new Error("VIEW_END no coincide con los chunks recibidos");
     }
 
@@ -279,7 +282,7 @@ async function receiveViewEnd(buffer) {
     minimap.capture(view);
     viewStatusElement.textContent =
         `VIEW ${message.generationId} completa: ${message.chunkCount} chunks, `
-        + formatBytes(Number(message.totalJpegBytes));
+        + formatBytes(Number(message.totalImageBytes));
 }
 
 // 11. El WebSocket distribuye respuestas PAI al catálogo o a la vista activa.
@@ -305,6 +308,7 @@ socket.addEventListener("message", async (event) => {
                 receiveViewStart(event.data);
                 break;
             case PaiOpcode.CHUNK:
+            case PaiOpcode.CHUNK_PNG:
                 receiveChunk(event.data);
                 break;
             case PaiOpcode.VIEW_END:
