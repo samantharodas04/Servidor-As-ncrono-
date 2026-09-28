@@ -8,13 +8,25 @@ export function createMinimap({panel, frame, canvas, marker, imageCanvas,
     const context = canvas.getContext("2d");
     let geometry = null;
     let drag = null;
+    let previewImage = null;
 
     function clear() {
         context.clearRect(0, 0, canvas.width, canvas.height);
         geometry = null;
         drag = null;
+        previewImage = null;
         frame.classList.remove("dragging");
         panel.hidden = true;
+    }
+
+    function usePreview(imageId, element) {
+        if (!element.complete || element.naturalWidth === 0) return;
+        previewImage = {imageId, element};
+        if (geometry?.imageId === imageId) {
+            context.clearRect(0, 0, canvas.width, canvas.height);
+            context.drawImage(element, geometry.x, geometry.y,
+                geometry.width, geometry.height);
+        }
     }
 
     function capture(view) {
@@ -36,8 +48,13 @@ export function createMinimap({panel, frame, canvas, marker, imageCanvas,
         const y = (canvas.height - height) / 2;
 
         context.clearRect(0, 0, canvas.width, canvas.height);
-        context.drawImage(imageCanvas,
-            sourceX, sourceY, sourceWidth, sourceHeight, x, y, width, height);
+        if (previewImage?.imageId === image.id) {
+            context.drawImage(previewImage.element, x, y, width, height);
+        } else {
+            // La vista por chunks sirve de respaldo si no hay miniatura preparada.
+            context.drawImage(imageCanvas,
+                sourceX, sourceY, sourceWidth, sourceHeight, x, y, width, height);
+        }
         geometry = {imageId: image.id, x, y, width, height};
         panel.hidden = false;
         updateMarker(view);
@@ -158,5 +175,5 @@ export function createMinimap({panel, frame, canvas, marker, imageCanvas,
         moveView(...movement);
     });
 
-    return {clear, capture, updateMarker};
+    return {clear, usePreview, capture, updateMarker};
 }

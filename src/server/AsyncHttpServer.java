@@ -32,6 +32,7 @@ import java.util.Map;
 import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 
 /** Servidor HTTP asincrono que recibe mensajes binarios PAI en /pai. */
 public final class AsyncHttpServer implements AutoCloseable {
@@ -48,6 +49,7 @@ public final class AsyncHttpServer implements AutoCloseable {
     private final List<ImageSource> images;
     private final Map<AsynchronousSocketChannel, ClientSession> sessions;
     private final ViewProcessor viewProcessor;
+    private final ThumbnailService thumbnails;
 
     private AsynchronousChannelGroup channelGroup;
     private AsynchronousServerSocketChannel serverChannel;
@@ -62,6 +64,7 @@ public final class AsyncHttpServer implements AutoCloseable {
         this.images = List.copyOf(images);
         this.sessions = new ConcurrentHashMap<>();
         this.viewProcessor = new ViewProcessor(images, VIEW_WORKERS, MAX_CACHE_BYTES);
+        this.thumbnails = new ThumbnailService();
     }
 
     public synchronized void start() throws IOException {
@@ -165,6 +168,11 @@ public final class AsyncHttpServer implements AutoCloseable {
 
             if (!"GET".equals(method)) {
                 writeAndClose(client, textResponse(405, "Metodo no permitido"));
+                return;
+            }
+
+            if (path.startsWith("/thumbnail/")) {
+                serveThumbnail(client, path.substring("/thumbnail/".length()));
                 return;
             }
 
@@ -450,6 +458,29 @@ public final class AsyncHttpServer implements AutoCloseable {
         writeAndClose(client, httpResponse(200, mimeType(requested), body));
     }
 
+    private void serveThumbnail(AsynchronousSocketChannel client, String id) {
+        ImageSource image = images.stream()
+                .filter(candidate -> candidate.id().equals(id))
+                .findFirst().orElse(null);
+        if (image == null) {
+            writeAndClose(client, textResponse(404, "Imagen no encontrada"));
+            return;
+        }
+        // libvips trabaja fuera de los hilos que aceptan HTTP y WebSocket.
+        try {
+            thumbnails.load(image).whenComplete((bytes, error) -> {
+                if (error == null) {
+                    writeAndClose(client, httpResponse(200, "image/jpeg", bytes));
+                } else {
+                    System.err.println("[THUMBNAIL] " + id + ": " + error.getMessage());
+                    writeAndClose(client, textResponse(404, "Miniatura no disponible"));
+                }
+            });
+        } catch (RejectedExecutionException overloaded) {
+            writeAndClose(client, textResponse(503, "Miniaturas ocupadas"));
+        }
+    }
+
     private byte[] textResponse(int status, String message) {
         return httpResponse(
                 status,
@@ -465,6 +496,7 @@ public final class AsyncHttpServer implements AutoCloseable {
             case 404 -> "Not Found";
             case 405 -> "Method Not Allowed";
             case 431 -> "Request Header Fields Too Large";
+            case 503 -> "Service Unavailable";
             default -> "Internal Server Error";
         };
         String head = "HTTP/1.1 " + status + " " + reason + "\r\n"
@@ -555,6 +587,7 @@ public final class AsyncHttpServer implements AutoCloseable {
             }
         }
         viewProcessor.close();
+        thumbnails.close();
     }
 
     /** Estado de una conexion: coordinador propio y una sola escritura a la vez. */

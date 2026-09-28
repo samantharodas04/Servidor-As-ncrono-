@@ -16,11 +16,15 @@ const statusElement = document.getElementById("connectionStatus");
 const viewStatusElement = document.getElementById("viewStatus");
 const sendValidButton = document.getElementById("sendValidView");
 const sendInvalidButton = document.getElementById("sendInvalidView");
+const unknownImageButton = document.getElementById("sendUnknownImage");
+const invalidZoomButton = document.getElementById("sendInvalidZoom");
+const dropAckButton = document.getElementById("dropNextAck");
+const testStatusElement = document.getElementById("testStatus");
 const zoomOutButton = document.getElementById("zoomOut");
 const zoomInButton = document.getElementById("zoomIn");
 const zoomStatusElement = document.getElementById("zoomStatus");
 const imageSelect = document.getElementById("imageSelect");
-const imageInfoElement = document.getElementById("imageInfo");
+const imageChoicesElement = document.getElementById("imageChoices");
 const catalogStatusElement = document.getElementById("catalogStatus");
 const cacheStatusElement = document.getElementById("cacheStatus");
 const positionStatusElement = document.getElementById("positionStatus");
@@ -46,6 +50,21 @@ let activeView = null;
 let currentRequest = null;
 let dragStart = null;
 let wheelTimer = null;
+let pendingErrorTest = null;
+let dropNextAck = false;
+let recoveryTestGenerationId = null;
+let pendingReconnectTest = false;
+
+function setTestButtonsDisabled(disabled) {
+    document.querySelectorAll(".protocol-test").forEach((button) => {
+        button.disabled = disabled;
+    });
+}
+
+function setTestStatus(message, state) {
+    testStatusElement.textContent = message;
+    testStatusElement.dataset.state = state;
+}
 
 function updateNavigation() {
     const image = catalog.get(imageSelect.value);
@@ -65,6 +84,9 @@ function requestView(view) {
     // Cada accion de navegacion invalida la generacion anterior.
     if (!requireOpenSocket()) return;
     const request = {...view, generationId: generationId++};
+    pendingErrorTest = null;
+    dropNextAck = false;
+    recoveryTestGenerationId = null;
     currentRequest = request;
     latestRequestedGenerationId = request.generationId;
     activeView = null;
@@ -135,11 +157,63 @@ function formatBytes(bytes) {
     return value.toFixed(unit === 0 ? 0 : 1) + " " + units[unit];
 }
 
+function createImageChoice(image) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "image-choice";
+    button.dataset.imageId = image.id;
+    button.dataset.version = `${image.sizeBytes}:${image.width}:${image.height}`;
+    button.setAttribute("aria-pressed", "false");
+
+    const frame = document.createElement("span");
+    frame.className = "image-choice-frame";
+    const preview = document.createElement("img");
+    preview.alt = "";
+    preview.loading = "lazy";
+    preview.decoding = "async";
+    preview.className = "pending";
+    const fallback = document.createElement("span");
+    fallback.textContent = "Cargando vista previa...";
+    preview.addEventListener("load", () => {
+        preview.classList.remove("pending");
+        fallback.hidden = true;
+        if (imageSelect.value === image.id) minimap.usePreview(image.id, preview);
+    });
+    preview.addEventListener("error", () => {
+        fallback.textContent = "Vista previa no disponible";
+    });
+    frame.append(preview, fallback);
+
+    const footer = document.createElement("span");
+    footer.className = "image-choice-footer";
+    const name = document.createElement("strong");
+    name.textContent = image.name;
+    name.title = image.name;
+    const metadata = document.createElement("small");
+    metadata.textContent = `${image.width} × ${image.height} píxeles · ${formatBytes(image.sizeBytes)}`;
+    footer.append(name, metadata);
+    button.append(frame, footer);
+    button.addEventListener("click", () => {
+        if (imageSelect.value === image.id) return;
+        imageSelect.value = image.id;
+        imageSelect.dispatchEvent(new Event("change"));
+    });
+    preview.src = `/thumbnail/${encodeURIComponent(image.id)}`;
+    return button;
+}
+
 function showSelectedImage() {
     const image = catalog.get(imageSelect.value);
-    imageInfoElement.textContent = image
-        ? image.width + " × " + image.height + " píxeles | " + formatBytes(image.sizeBytes)
-        : "Ninguna imagen seleccionada";
+    for (const choice of imageChoicesElement.children) {
+        const selected = choice.dataset.imageId === image?.id;
+        choice.setAttribute("aria-pressed", String(selected));
+        if (selected) {
+            const preview = choice.querySelector("img");
+            if (preview.complete && preview.naturalWidth > 0) {
+                minimap.usePreview(image.id, preview);
+            }
+        }
+    }
     updateNavigation();
     updatePosition();
 }
@@ -171,13 +245,21 @@ function showCatalog(images) {
     updateCacheStatus();
     catalog.clear();
     imageSelect.replaceChildren();
+    const existingChoices = new Map([...imageChoicesElement.children]
+        .map((choice) => [choice.dataset.imageId, choice]));
+    const choices = [];
     for (const image of images) {
         catalog.set(image.id, image);
         const option = document.createElement("option");
         option.value = image.id;
         option.textContent = image.name;
         imageSelect.append(option);
+        const existing = existingChoices.get(image.id);
+        const version = `${image.sizeBytes}:${image.width}:${image.height}`;
+        choices.push(existing?.dataset.version === version
+            ? existing : createImageChoice(image));
     }
+    imageChoicesElement.replaceChildren(...choices);
     if (catalog.has(previousRequest?.imageId)) {
         imageSelect.value = previousRequest.imageId;
     } else if (catalog.has(selectedId)) {
@@ -186,11 +268,18 @@ function showCatalog(images) {
 
     const hasImages = images.length > 0;
     imageSelect.disabled = !hasImages;
+    imageChoicesElement.querySelectorAll("button").forEach((choice) => {
+        choice.disabled = !hasImages;
+    });
     sendValidButton.disabled = !hasImages;
-    sendInvalidButton.disabled = !hasImages;
+    setTestButtonsDisabled(!hasImages);
     catalogStatusElement.textContent = images.length + " imagen(es) disponible(s)";
     reconnectAttempts = 0;
     showSelectedImage();
+    if (pendingReconnectTest) {
+        setTestStatus("Correcto: conexión recuperada y catálogo recibido.", "success");
+        pendingReconnectTest = false;
+    }
     if (previousRequest) {
         const image = catalog.get(previousRequest.imageId);
         if (image) {
@@ -281,7 +370,7 @@ function receiveChunk(buffer) {
         activeView.recoveredIndexes.add(message.index);
         if (activeView.drawnIndexes.has(message.index)
                 && socket.readyState === WebSocket.OPEN) {
-            socket.send(encodeChunkAck(activeView.generationId, message.index));
+            sendChunkAck(activeView.generationId, message.index);
         }
         return;
     }
@@ -298,7 +387,7 @@ function receiveChunk(buffer) {
         return drawChunk(view, message).then(() => {
             if (activeView === view && socket.readyState === WebSocket.OPEN) {
                 view.drawnIndexes.add(message.index);
-                socket.send(encodeChunkAck(view.generationId, message.index));
+                sendChunkAck(view.generationId, message.index);
             }
         });
     }).catch((error) => {
@@ -307,6 +396,16 @@ function receiveChunk(buffer) {
             viewStatusElement.textContent = "No se pudo dibujar un CHUNK: " + error.message;
         }
     });
+}
+
+function sendChunkAck(viewGenerationId, chunkIndex) {
+    if (dropNextAck && recoveryTestGenerationId === viewGenerationId) {
+        dropNextAck = false;
+        setTestStatus(`ACK del chunk ${chunkIndex} omitido; esperando reenvío...`,
+            "pending");
+        return;
+    }
+    socket.send(encodeChunkAck(viewGenerationId, chunkIndex));
 }
 
 async function receiveViewEnd(buffer) {
@@ -329,10 +428,27 @@ async function receiveViewEnd(buffer) {
         + formatBytes(Number(message.totalImageBytes))
         + (view.recoveredIndexes.size
             ? ` · ${view.recoveredIndexes.size} recuperado(s)` : "");
+    if (recoveryTestGenerationId === message.generationId) {
+        const result = view.recoveredIndexes.size
+            ? `Correcto: ${view.recoveredIndexes.size} `
+                + (view.recoveredIndexes.size === 1 ? "chunk reenviado y reconocido."
+                    : "chunks reenviados y reconocidos.")
+            : "La vista terminó sin reenvío; repite la prueba.";
+        setTestStatus(result, view.recoveredIndexes.size ? "success" : "error");
+        recoveryTestGenerationId = null;
+    }
 }
 
 function receiveViewError(buffer) {
     const message = decodeViewError(buffer);
+    if (pendingErrorTest?.generationId === message.generationId) {
+        setTestStatus(
+            `Correcto: ${pendingErrorTest.label} produjo VIEW_ERROR y la conexión sigue abierta.`,
+            "success");
+        pendingErrorTest = null;
+        if (currentRequest) requestView(currentRequest);
+        return;
+    }
     if (message.generationId !== latestRequestedGenerationId) return;
     activeView = null;
     viewStatusElement.textContent = `VIEW ${message.generationId}: ${message.message}`;
@@ -412,12 +528,21 @@ function connect() {
     connection.addEventListener("close", () => {
         if (socket !== connection) return;
         activeView = null;
+        dropNextAck = false;
+        recoveryTestGenerationId = null;
         bitmapCache.clear();
         updateCacheStatus();
         statusElement.parentElement.dataset.state = "disconnected";
         imageSelect.disabled = true;
+        imageChoicesElement.querySelectorAll("button").forEach((choice) => {
+            choice.disabled = true;
+        });
         sendValidButton.disabled = true;
-        sendInvalidButton.disabled = true;
+        setTestButtonsDisabled(true);
+        if (pendingReconnectTest) {
+            setTestStatus("Correcto: el servidor cerró la conexión; reconectando...",
+                "pending");
+        }
         updateNavigation();
         scheduleReconnect();
     });
@@ -496,7 +621,41 @@ sendInvalidButton.addEventListener("click", () => {
     const invalid = new Uint8Array(encodeView(request));
     invalid[0] ^= 0x01;
     socket.send(invalid);
-    viewStatusElement.textContent = "VIEW inválido enviado; el servidor debe rechazarlo";
+    pendingReconnectTest = true;
+    setTestStatus("Firma alterada; esperando rechazo y reconexión...", "pending");
+});
+
+function sendErrorTest(view, label) {
+    if (!requireOpenSocket()) return;
+    const request = {...view, generationId: generationId++};
+    pendingErrorTest = {generationId: request.generationId, label};
+    dropNextAck = false;
+    recoveryTestGenerationId = null;
+    activeView = null;
+    latestRequestedGenerationId = request.generationId;
+    socket.send(encodeView(request));
+    setTestStatus(`${label}: esperando VIEW_ERROR...`, "pending");
+}
+
+unknownImageButton.addEventListener("click", () => {
+    const image = catalog.get(imageSelect.value);
+    if (image) sendErrorTest({...initialView(image), imageId: "__imagen_inexistente__"},
+        "Imagen desconocida");
+});
+
+invalidZoomButton.addEventListener("click", () => {
+    const image = catalog.get(imageSelect.value);
+    if (image) sendErrorTest({...initialView(image), zoomIndex: 999},
+        "Zoom fuera de rango");
+});
+
+dropAckButton.addEventListener("click", () => {
+    const image = catalog.get(imageSelect.value);
+    if (!image || !requireOpenSocket()) return;
+    requestView(currentRequest?.imageId === image.id ? currentRequest : initialView(image));
+    dropNextAck = true;
+    recoveryTestGenerationId = latestRequestedGenerationId;
+    setTestStatus("Se omitirá un ACK; esperando el reenvío del chunk...", "pending");
 });
 
 connect();
