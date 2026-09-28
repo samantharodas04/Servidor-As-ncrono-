@@ -11,12 +11,14 @@ import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.Objects;
 
-/** Codifica START, chunks JPEG/PNG y END; el opcode indica el formato del chunk. */
+/** Codifica START, JPEG/PNG, referencias sin imagen, errores y END. */
 public final class ViewResponseCodec {
     public static final int VIEW_START_BYTES = PaiProtocol.HEADER_BYTES
             + Long.BYTES + (Integer.BYTES * 8);
     public static final int CHUNK_METADATA_BYTES = PaiProtocol.HEADER_BYTES
             + Long.BYTES + (Integer.BYTES * 8);
+    public static final int CHUNK_REF_BYTES = PaiProtocol.HEADER_BYTES
+            + Long.BYTES + (Integer.BYTES * 7);
     public static final int VIEW_END_BYTES = PaiProtocol.HEADER_BYTES
             + Long.BYTES + Integer.BYTES + Long.BYTES;
 
@@ -29,7 +31,7 @@ public final class ViewResponseCodec {
      */
     public static byte[] encodeViewStart(ViewResult result) {
         Objects.requireNonNull(result, "result");
-        return encodeViewStart(result.request(), result.region(), result.chunks().size());
+        return encodeViewStart(result.request(), result.region(), result.plan().chunks().size());
     }
 
     public static byte[] encodeViewStart(
@@ -60,10 +62,15 @@ public final class ViewResponseCodec {
      */
     public static byte[] encodeChunk(ViewResult result, int chunkIndex) {
         Objects.requireNonNull(result, "result");
-        if (chunkIndex < 0 || chunkIndex >= result.chunks().size()) {
+        if (chunkIndex < 0 || chunkIndex >= result.plan().chunks().size()) {
             throw new IllegalArgumentException("Indice de chunk fuera de rango");
         }
-        return encodeChunk(result.request(), chunkIndex, result.chunks().get(chunkIndex));
+        PlannedChunk planned = result.plan().chunks().get(chunkIndex);
+        RenderedChunk rendered = result.chunks().stream()
+                .filter(chunk -> chunk.chunk().equals(planned))
+                .findFirst().orElseThrow(() ->
+                        new IllegalArgumentException("El indice corresponde a CHUNK_REF"));
+        return encodeChunk(result.request(), chunkIndex, rendered);
     }
 
     public static byte[] encodeChunk(
@@ -97,8 +104,29 @@ public final class ViewResponseCodec {
         ByteBuffer output = buffer(VIEW_END_BYTES);
         PaiProtocol.putHeader(output, PaiOpcode.VIEW_END);
         output.putLong(result.request().generationId());
-        output.putInt(result.chunks().size());
+        output.putInt(result.plan().chunks().size());
         output.putLong(result.totalChunkBytes());
+        return output.array();
+    }
+
+    /** Referencia un bitmap que el cliente anunció en VIEW_CACHED. */
+    public static byte[] encodeChunkRef(ViewRequest request, int chunkIndex,
+                                        PlannedChunk chunk) {
+        Objects.requireNonNull(request, "request");
+        Objects.requireNonNull(chunk, "chunk");
+        if (chunkIndex < 0) {
+            throw new IllegalArgumentException("Indice de chunk fuera de rango");
+        }
+        ByteBuffer output = buffer(CHUNK_REF_BYTES);
+        PaiProtocol.putHeader(output, PaiOpcode.CHUNK_REF);
+        output.putLong(request.generationId());
+        output.putInt(chunkIndex);
+        output.putInt(chunk.column());
+        output.putInt(chunk.row());
+        output.putInt(chunk.canvasX());
+        output.putInt(chunk.canvasY());
+        output.putInt(chunk.outputWidth());
+        output.putInt(chunk.outputHeight());
         return output.array();
     }
 

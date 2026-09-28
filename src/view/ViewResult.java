@@ -6,7 +6,7 @@ import image.RenderedChunk;
 import java.util.List;
 import java.util.Objects;
 
-/** Resultado completo; con preparación individual, los tiempos suman ambos workers. */
+/** Resultado completo; chunks contiene solo imagenes enviadas, no referencias. */
 public record ViewResult(
         ViewRequest request,
         ImageSource source,
@@ -15,6 +15,7 @@ public record ViewResult(
         ViewRegion preparedRegion,
         ViewChunkPlan plan,
         List<RenderedChunk> chunks,
+        int reusedChunks,
         int cacheHits,
         int generatedChunks,
         boolean individualPreparation,
@@ -30,8 +31,8 @@ public record ViewResult(
         Objects.requireNonNull(preparedRegion, "preparedRegion");
         Objects.requireNonNull(plan, "plan");
         chunks = List.copyOf(chunks);
-        if (chunks.size() != plan.chunks().size()) {
-            throw new IllegalArgumentException("Faltan chunks en el resultado de la vista");
+        if (reusedChunks < 0 || chunks.size() + reusedChunks != plan.chunks().size()) {
+            throw new IllegalArgumentException("Conteo de chunks reutilizados inconsistente");
         }
         if (cacheHits < 0 || generatedChunks < 0
                 || cacheHits + generatedChunks != chunks.size()) {

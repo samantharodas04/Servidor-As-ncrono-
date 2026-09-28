@@ -18,6 +18,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.HashSet;
 
 /** Convierte VIEW en chunks JPEG o PNG; no conoce el navegador ni el WebSocket. */
 public final class ViewProcessor implements AutoCloseable {
@@ -30,12 +32,22 @@ public final class ViewProcessor implements AutoCloseable {
     private final PreparedSourceStore sourceStore;
     private final ChunkWorkerPool workers;
     private final ChunkCache cache;
+    private final int normalJpegQuality;
 
     public ViewProcessor(List<ImageSource> sources, int workerCount) {
         this(sources, workerCount, DEFAULT_CACHE_BYTES);
     }
 
     public ViewProcessor(List<ImageSource> sources, int workerCount, long maximumCacheBytes) {
+        this(sources, workerCount, maximumCacheBytes, 85);
+    }
+
+    public ViewProcessor(List<ImageSource> sources, int workerCount, long maximumCacheBytes,
+                         int normalJpegQuality) {
+        if (normalJpegQuality < 1 || normalJpegQuality > 100) {
+            throw new IllegalArgumentException("Calidad JPEG fuera de rango");
+        }
+        this.normalJpegQuality = normalJpegQuality;
         this.sourcesById = indexSources(sources);
         this.viewPreparer = new VipsViewPreparer();
         this.sourceStore = new PreparedSourceStore(Path.of("images", "processed"));
@@ -71,7 +83,14 @@ public final class ViewProcessor implements AutoCloseable {
 
         Map<PlannedChunk, RenderedChunk> available = new LinkedHashMap<>();
         List<PlannedChunk> missing = new ArrayList<>();
+        Set<CachedChunk> claimed = Set.copyOf(request.cachedChunks());
+        Set<PlannedChunk> reused = new HashSet<>();
         for (PlannedChunk chunk : completePlan.chunks()) {
+            if (claimed.contains(new CachedChunk(chunk.column(), chunk.row(),
+                    chunk.outputWidth(), chunk.outputHeight()))) {
+                reused.add(chunk);
+                continue;
+            }
             byte[] cachedBytes = cache.get(cacheKey(source, request, stablePlan, chunk));
             if (cachedBytes == null) {
                 missing.add(chunk);
@@ -99,6 +118,11 @@ public final class ViewProcessor implements AutoCloseable {
         for (int index = 0; index < completePlan.chunks().size(); index++) {
             PlannedChunk chunk = completePlan.chunks().get(index);
             indexByChunk.put(chunk, index);
+            if (reused.contains(chunk)) {
+                ensureNotCancelled();
+                progress.onReference(request, index, chunk);
+                continue;
+            }
             RenderedChunk cached = available.get(chunk);
             if (cached != null) {
                 ensureNotCancelled();
@@ -137,7 +161,7 @@ public final class ViewProcessor implements AutoCloseable {
                 ChunkWorkerPool.ChunkTimes times = workers.renderIndividuallyAsCompleted(
                         renderSource.path(), stablePlan, missing,
                         renderSource.ratioX(), renderSource.ratioY(),
-                        zoomLevel.scale() > 1.0 ? 92 : 85, losslessChunks, deliver
+                        normalJpegQuality, losslessChunks, deliver
                 );
                 preparationNanos = times.preparationNanos();
                 chunkNanos = times.renderNanos();
@@ -150,7 +174,7 @@ public final class ViewProcessor implements AutoCloseable {
                     ensureNotCancelled();
                     long chunksStartedAt = System.nanoTime();
                     workers.renderAsCompleted(preparedView.path(), generationPlan.chunkPlan(),
-                            zoomLevel.scale() > 1.0 ? 92 : 85, losslessChunks, deliver);
+                            normalJpegQuality, losslessChunks, deliver);
                     chunkNanos = System.nanoTime() - chunksStartedAt;
                 }
             }
@@ -175,9 +199,10 @@ public final class ViewProcessor implements AutoCloseable {
         }
 
         List<RenderedChunk> orderedChunks = completePlan.chunks().stream()
+                .filter(chunk -> !reused.contains(chunk))
                 .map(available::get)
                 .toList();
-        validateCoverage(stablePlan.preparedRegion(), completePlan, orderedChunks);
+        validateCoverage(stablePlan.preparedRegion(), completePlan, available, reused);
         return new ViewResult(
                 request,
                 source,
@@ -186,6 +211,7 @@ public final class ViewProcessor implements AutoCloseable {
                 stablePlan.preparedRegion(),
                 completePlan,
                 orderedChunks,
+                reused.size(),
                 cacheHits,
                 missing.size(),
                 individualPreparation,
@@ -286,21 +312,21 @@ public final class ViewProcessor implements AutoCloseable {
     private void validateCoverage(
             ViewRegion preparedRegion,
             ViewChunkPlan plan,
-            List<RenderedChunk> rendered
+            Map<PlannedChunk, RenderedChunk> rendered,
+            Set<PlannedChunk> reused
     ) {
-        long sourceArea = rendered.stream()
-                .map(RenderedChunk::chunk)
+        long sourceArea = plan.chunks().stream()
                 .mapToLong(chunk -> (long) chunk.sourceWidth() * chunk.sourceHeight())
                 .sum();
-        long outputArea = rendered.stream()
-                .map(RenderedChunk::chunk)
+        long outputArea = plan.chunks().stream()
                 .mapToLong(chunk -> (long) chunk.outputWidth() * chunk.outputHeight())
                 .sum();
 
         long expectedSourceArea = (long) preparedRegion.width() * preparedRegion.height();
         long expectedOutputArea = (long) plan.renderedWidth() * plan.renderedHeight();
-        if (rendered.size() != plan.chunks().size()
-                || rendered.stream().anyMatch(chunk -> chunk == null)
+        if (rendered.size() + reused.size() != plan.chunks().size()
+                || plan.chunks().stream().anyMatch(chunk ->
+                        !reused.contains(chunk) && !rendered.containsKey(chunk))
                 || sourceArea != expectedSourceArea
                 || outputArea != expectedOutputArea) {
             throw new IllegalStateException("Los chunks no cubren exactamente el area preparada");

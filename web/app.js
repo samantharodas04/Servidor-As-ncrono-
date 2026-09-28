@@ -1,15 +1,13 @@
 "use strict";
 
 import {PaiOpcode, encodeListImages, encodeView, encodeChunkAck, readPaiOpcode,
-    decodeImageList, decodeViewStart, decodeChunk, decodeViewEnd,
+    decodeImageList, decodeViewStart, decodeChunk, decodeChunkRef, decodeViewEnd,
     decodeViewError} from "./protocol.js";
 import {zoomScales as calculateZoomScales, initialView as createInitialView,
     clampVisibleCenter} from "./navigation.js";
 import {BitmapCache} from "./bitmap-cache.js";
 import {createMinimap} from "./minimap.js";
-
-// Cambiar a false y recargar la página para detener el zoom gigante en 1:1.
-const ENABLE_EXTRA_GIANT_ZOOM = true;
+import {viewerConfig} from "./config.js";
 
 // 8. El visor conserva el catálogo, la solicitud vigente y los bitmaps reutilizables.
 const statusElement = document.getElementById("connectionStatus");
@@ -34,11 +32,10 @@ const overviewPanel = document.getElementById("overviewPanel");
 const overviewFrame = document.getElementById("overviewFrame");
 const overviewCanvas = document.getElementById("overviewCanvas");
 const overviewMarker = document.getElementById("overviewMarker");
-const bitmapCache = new BitmapCache(12 * 1024 * 1024);
+const bitmapCache = new BitmapCache(viewerConfig.bitmapCacheMiB * 1024 * 1024);
 
 const scheme = window.location.protocol === "https:" ? "wss" : "ws";
 const socketUrl = `${scheme}://${window.location.host}/pai`;
-const MAX_RECONNECT_ATTEMPTS = 5;
 let socket = null;
 let reconnectTimer = null;
 let reconnectAttempts = 0;
@@ -54,6 +51,12 @@ let pendingErrorTest = null;
 let dropNextAck = false;
 let recoveryTestGenerationId = null;
 let pendingReconnectTest = false;
+let pinnedKeys = [];
+
+function releasePinnedBitmaps() {
+    bitmapCache.release(pinnedKeys);
+    pinnedKeys = [];
+}
 
 function setTestButtonsDisabled(disabled) {
     document.querySelectorAll(".protocol-test").forEach((button) => {
@@ -79,11 +82,18 @@ function updateNavigation() {
     sendValidButton.textContent = currentRequest ? "Reiniciar vista" : "Mostrar imagen";
 }
 
-function requestView(view) {
+function requestView(view, reuseCached = true) {
     // Envia ID, zoom, centro y tamano; el archivo permanece en el servidor.
     // Cada accion de navegacion invalida la generacion anterior.
     if (!requireOpenSocket()) return;
-    const request = {...view, generationId: generationId++};
+    releasePinnedBitmaps();
+    const image = catalog.get(view.imageId);
+    const pinned = image && reuseCached ? bitmapCache.pinMatching(view.imageId,
+        image.sizeBytes, view.zoomIndex, view.viewportWidth, view.viewportHeight) : [];
+    pinnedKeys = pinned.map((chunk) => chunk.key);
+    const request = {...view, generationId: generationId++,
+        cachedChunks: pinned.map(({column, row, width, height}) =>
+            ({column, row, width, height}))};
     pendingErrorTest = null;
     dropNextAck = false;
     recoveryTestGenerationId = null;
@@ -139,7 +149,7 @@ const minimap = createMinimap({
 
 function zoomScales(image) {
     return calculateZoomScales(image, imageCanvas.width, imageCanvas.height,
-        ENABLE_EXTRA_GIANT_ZOOM);
+        viewerConfig.enableExtraGiantZoom);
 }
 
 function initialView(image) {
@@ -241,6 +251,7 @@ function showCatalog(images) {
         && image.height === previousImage.height
         && image.sizeBytes === previousImage.sizeBytes);
     if (!sameImage) minimap.clear();
+    releasePinnedBitmaps();
     bitmapCache.clear();
     updateCacheStatus();
     catalog.clear();
@@ -303,7 +314,7 @@ function requireOpenSocket() {
 }
 
 function receiveViewStart(buffer) {
-    // 9. START abre la vista; los CHUNK se dibujan en dos carriles de decodificación.
+    // 9. START abre la vista; los CHUNK se dibujan en carriles de decodificación.
     const message = decodeViewStart(buffer);
     if (message.generationId !== latestRequestedGenerationId) return;
 
@@ -314,10 +325,11 @@ function receiveViewStart(buffer) {
         imageId: currentRequest.imageId,
         sourceSizeBytes: catalog.get(currentRequest.imageId)?.sizeBytes,
         receivedIndexes: new Set(),
+        reusedIndexes: new Set(),
         drawnIndexes: new Set(),
         recoveredIndexes: new Set(),
         receivedBytes: 0n,
-        drawLanes: [Promise.resolve(), Promise.resolve()],
+        drawLanes: Array.from({length: viewerConfig.decodeLanes}, () => Promise.resolve()),
         nextDrawLane: 0,
         drawError: null
     };
@@ -326,14 +338,18 @@ function receiveViewStart(buffer) {
         `VIEW ${message.generationId}: esperando ${message.chunkCount} chunks`;
 }
 
-async function drawChunk(view, message) {
-    if (activeView !== view) return;
-    // Reutiliza el bitmap si existe; si no, decodifica el JPEG o PNG recibido.
-    const key = JSON.stringify([
+function bitmapKey(view, message) {
+    return JSON.stringify([
         view.imageId, view.sourceSizeBytes, view.zoomIndex,
         view.viewportWidth, view.viewportHeight,
         message.column, message.row, message.width, message.height
     ]);
+}
+
+async function drawChunk(view, message) {
+    if (activeView !== view) return;
+    // Reutiliza el bitmap si existe; si no, decodifica el JPEG o PNG recibido.
+    const key = bitmapKey(view, message);
     const cached = bitmapCache.get(key);
     if (cached) {
         canvasContext.drawImage(cached, message.canvasX, message.canvasY);
@@ -357,6 +373,38 @@ async function drawChunk(view, message) {
     } finally {
         if (!retained) bitmap.close();
     }
+}
+
+function receiveChunkRef(buffer) {
+    const message = decodeChunkRef(buffer);
+    if (!activeView || message.generationId !== activeView.generationId) return;
+    if (message.index >= activeView.chunkCount
+            || activeView.receivedIndexes.has(message.index)) {
+        throw new Error("CHUNK_REF duplicado o fuera de rango");
+    }
+    const view = activeView;
+    const key = bitmapKey(view, message);
+    if (!pinnedKeys.includes(key)) {
+        throw new Error("CHUNK_REF no fue anunciado en VIEW_CACHED");
+    }
+    view.receivedIndexes.add(message.index);
+    view.reusedIndexes.add(message.index);
+    viewStatusElement.textContent =
+        `VIEW ${message.generationId}: ${view.receivedIndexes.size}/${view.chunkCount} chunks`;
+    const lane = view.nextDrawLane++ % view.drawLanes.length;
+    view.drawLanes[lane] = view.drawLanes[lane].then(() => {
+        if (activeView !== view || view.drawError) return;
+        const bitmap = bitmapCache.get(key);
+        if (!bitmap) throw new Error("Bitmap anunciado ya no está en caché");
+        canvasContext.drawImage(bitmap, message.canvasX, message.canvasY);
+        view.drawnIndexes.add(message.index);
+        updateCacheStatus();
+    }).catch((error) => {
+        if (activeView === view) {
+            view.drawError = error;
+            viewStatusElement.textContent = "No se pudo dibujar CHUNK_REF: " + error.message;
+        }
+    });
 }
 
 function receiveChunk(buffer) {
@@ -423,9 +471,12 @@ async function receiveViewEnd(buffer) {
     if (activeView !== view) return;
     if (view.drawError) throw view.drawError;
     minimap.capture(view);
+    releasePinnedBitmaps();
     viewStatusElement.textContent =
         `VIEW ${message.generationId} completa: ${message.chunkCount} chunks, `
         + formatBytes(Number(message.totalImageBytes))
+        + (view.reusedIndexes.size
+            ? ` · ${view.reusedIndexes.size} reutilizado(s) sin imagen` : "")
         + (view.recoveredIndexes.size
             ? ` · ${view.recoveredIndexes.size} recuperado(s)` : "");
     if (recoveryTestGenerationId === message.generationId) {
@@ -450,6 +501,7 @@ function receiveViewError(buffer) {
         return;
     }
     if (message.generationId !== latestRequestedGenerationId) return;
+    releasePinnedBitmaps();
     activeView = null;
     viewStatusElement.textContent = `VIEW ${message.generationId}: ${message.message}`;
 }
@@ -457,14 +509,15 @@ function receiveViewError(buffer) {
 // 11. Al recuperar la conexión, el catálogo permite volver a pedir la última vista.
 function scheduleReconnect() {
     if (reconnectTimer !== null) return;
-    if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+    if (reconnectAttempts >= viewerConfig.maxReconnectAttempts) {
         statusElement.textContent = "Sin conexión; recarga la página para reintentar";
         viewStatusElement.textContent = "No se pudo recuperar la conexión";
         return;
     }
-    const delay = Math.min(500 * 2 ** reconnectAttempts, 8000);
+    const delay = Math.min(viewerConfig.reconnectBaseDelayMs * 2 ** reconnectAttempts,
+        viewerConfig.reconnectMaxDelayMs);
     reconnectAttempts++;
-    statusElement.textContent = `Desconectado · reintento ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}`;
+    statusElement.textContent = `Desconectado · reintento ${reconnectAttempts}/${viewerConfig.maxReconnectAttempts}`;
     if (currentRequest) viewStatusElement.textContent = "Recuperando la última vista...";
     reconnectTimer = setTimeout(() => {
         reconnectTimer = null;
@@ -489,6 +542,9 @@ async function receiveSocketMessage(event) {
             case PaiOpcode.CHUNK:
             case PaiOpcode.CHUNK_PNG:
                 receiveChunk(event.data);
+                break;
+            case PaiOpcode.CHUNK_REF:
+                receiveChunkRef(event.data);
                 break;
             case PaiOpcode.VIEW_END:
                 await receiveViewEnd(event.data);
@@ -528,6 +584,7 @@ function connect() {
     connection.addEventListener("close", () => {
         if (socket !== connection) return;
         activeView = null;
+        releasePinnedBitmaps();
         dropNextAck = false;
         recoveryTestGenerationId = null;
         bitmapCache.clear();
@@ -560,6 +617,7 @@ imageSelect.addEventListener("change", () => {
     wheelTimer = null;
     const wasViewing = currentRequest !== null;
     currentRequest = null;
+    releasePinnedBitmaps();
     activeView = null;
     latestRequestedGenerationId = 0n;
     canvasContext.clearRect(0, 0, imageCanvas.width, imageCanvas.height);
@@ -585,7 +643,7 @@ imageCanvas.addEventListener("wheel", (event) => {
     wheelTimer = setTimeout(() => {
         wheelTimer = null;
         changeZoom(direction);
-    }, 150);
+    }, viewerConfig.wheelDebounceMs);
 }, {passive: false});
 
 imageCanvas.addEventListener("pointerdown", (event) => {
@@ -652,7 +710,8 @@ invalidZoomButton.addEventListener("click", () => {
 dropAckButton.addEventListener("click", () => {
     const image = catalog.get(imageSelect.value);
     if (!image || !requireOpenSocket()) return;
-    requestView(currentRequest?.imageId === image.id ? currentRequest : initialView(image));
+    requestView(currentRequest?.imageId === image.id ? currentRequest : initialView(image),
+        false);
     dropNextAck = true;
     recoveryTestGenerationId = latestRequestedGenerationId;
     setTestStatus("Se omitirá un ACK; esperando el reenvío del chunk...", "pending");

@@ -1,6 +1,7 @@
 package view;
 
 import java.util.Objects;
+import java.util.List;
 
 /** Datos necesarios para solicitar una vista concreta de una imagen. */
 public record ViewRequest(
@@ -11,7 +12,8 @@ public record ViewRequest(
         int centerY,
         int viewportWidth,
         int viewportHeight,
-        int chunkSize
+        int chunkSize,
+        List<CachedChunk> cachedChunks
 ) {
     public ViewRequest {
         if (generationId < 1) {
@@ -30,6 +32,17 @@ public record ViewRequest(
         requirePositive(viewportWidth, "viewportWidth");
         requirePositive(viewportHeight, "viewportHeight");
         requirePositive(chunkSize, "chunkSize");
+        cachedChunks = List.copyOf(cachedChunks);
+        if (cachedChunks.size() > 128 || cachedChunks.stream().distinct().count() != cachedChunks.size()) {
+            throw new IllegalArgumentException("Lista de chunks reutilizables invalida");
+        }
+    }
+
+    public ViewRequest(long generationId, String imageId, int zoomIndex,
+                       int centerX, int centerY, int viewportWidth,
+                       int viewportHeight, int chunkSize) {
+        this(generationId, imageId, zoomIndex, centerX, centerY,
+                viewportWidth, viewportHeight, chunkSize, List.of());
     }
 
     private static void requirePositive(int value, String name) {

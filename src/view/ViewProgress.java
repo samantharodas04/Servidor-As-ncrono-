@@ -13,4 +13,8 @@ public interface ViewProgress {
     default void onChunk(ViewRequest request, int index, RenderedChunk chunk)
             throws IOException {
     }
+
+    default void onReference(ViewRequest request, int index, PlannedChunk chunk)
+            throws IOException {
+    }
 }

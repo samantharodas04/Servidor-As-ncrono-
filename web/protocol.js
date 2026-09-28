@@ -15,7 +15,9 @@ const PaiOpcode = Object.freeze({
     VIEW_END: 6,
     CHUNK_PNG: 7,
     VIEW_ERROR: 8,
-    CHUNK_ACK: 9
+    CHUNK_ACK: 9,
+    VIEW_CACHED: 10,
+    CHUNK_REF: 11
 });
 
 const PaiLimits = Object.freeze({
@@ -30,6 +32,7 @@ const VIEW_BODY_BYTES = 8 + (5 * 4) + 2;
 const VIEW_START_BYTES = PAI_HEADER_BYTES + 8 + (8 * 4);
 const CHUNK_METADATA_BYTES = PAI_HEADER_BYTES + 8 + (8 * 4);
 const VIEW_END_BYTES = PAI_HEADER_BYTES + 8 + 4 + 8;
+const CHUNK_REF_BYTES = PAI_HEADER_BYTES + 8 + (7 * 4);
 
 function createPaiMessage(opcode, payloadBytes = 0) {
     const buffer = new ArrayBuffer(PAI_HEADER_BYTES + payloadBytes);
@@ -212,6 +215,26 @@ function decodeChunk(buffer) {
         imageBytes, image, png};
 }
 
+function decodeChunkRef(buffer) {
+    const view = requirePaiMessage(buffer, PaiOpcode.CHUNK_REF);
+    if (view.byteLength !== CHUNK_REF_BYTES) {
+        throw new Error("CHUNK_REF tiene una longitud invalida");
+    }
+    let offset = PAI_HEADER_BYTES;
+    const generationId = view.getBigUint64(offset); offset += 8;
+    const index = view.getUint32(offset); offset += 4;
+    const column = view.getUint32(offset); offset += 4;
+    const row = view.getUint32(offset); offset += 4;
+    const canvasX = view.getInt32(offset); offset += 4;
+    const canvasY = view.getInt32(offset); offset += 4;
+    const width = view.getUint32(offset); offset += 4;
+    const height = view.getUint32(offset);
+    if (generationId < 1n || width < 1 || height < 1) {
+        throw new Error("CHUNK_REF contiene valores invalidos");
+    }
+    return {generationId, index, column, row, canvasX, canvasY, width, height};
+}
+
 function decodeViewEnd(buffer) {
     const view = requirePaiMessage(buffer, PaiOpcode.VIEW_END);
     if (view.byteLength !== VIEW_END_BYTES) {
@@ -239,9 +262,11 @@ function decodeViewError(buffer) {
 
 function encodeView(request) {
     const imageId = new TextEncoder().encode(request.imageId);
+    const cached = request.cachedChunks ?? [];
+    if (cached.length > 128) throw new Error("Demasiadas referencias de caché");
     const message = createPaiMessage(
-        PaiOpcode.VIEW,
-        VIEW_BODY_BYTES + imageId.length
+        cached.length ? PaiOpcode.VIEW_CACHED : PaiOpcode.VIEW,
+        VIEW_BODY_BYTES + imageId.length + (cached.length ? 2 + cached.length * 16 : 0)
     );
     const {buffer, view} = message;
     let {offset} = message;
@@ -260,7 +285,18 @@ function encodeView(request) {
     offset += 4;
     view.setUint16(offset, imageId.length);
     offset += 2;
-    new Uint8Array(buffer, offset).set(imageId);
+    new Uint8Array(buffer, offset, imageId.length).set(imageId);
+    offset += imageId.length;
+    if (cached.length) {
+        view.setUint16(offset, cached.length);
+        offset += 2;
+        for (const chunk of cached) {
+            view.setUint32(offset, chunk.column); offset += 4;
+            view.setUint32(offset, chunk.row); offset += 4;
+            view.setUint32(offset, chunk.width); offset += 4;
+            view.setUint32(offset, chunk.height); offset += 4;
+        }
+    }
     return buffer;
 }
 
@@ -272,4 +308,5 @@ function encodeChunkAck(generationId, chunkIndex) {
 }
 
 export {PaiOpcode, encodeListImages, encodeView, encodeChunkAck, readPaiOpcode,
-    decodeImageList, decodeViewStart, decodeChunk, decodeViewEnd, decodeViewError};
+    decodeImageList, decodeViewStart, decodeChunk, decodeChunkRef,
+    decodeViewEnd, decodeViewError};

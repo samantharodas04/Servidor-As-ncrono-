@@ -10,7 +10,7 @@ compile:
 	$(JAVAC) -encoding UTF-8 -d $(OUT) $(SOURCES)
 
 run: compile
-	$(JAVA) -cp $(OUT) Main -port 8080
+	$(JAVA) -cp $(OUT) Main
 
 prepare-image: compile
 	$(JAVA) -cp $(OUT) image.ImagePreparationTool $(IMAGE)

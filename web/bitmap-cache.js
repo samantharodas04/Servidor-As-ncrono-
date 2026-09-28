@@ -26,6 +26,28 @@ export class BitmapCache {
         return entry.bitmap;
     }
 
+    /** Fija los bitmaps anunciados al servidor hasta que termine la VIEW. */
+    pinMatching(imageId, sourceSizeBytes, zoomIndex, viewportWidth, viewportHeight) {
+        const matches = [];
+        for (const [key, entry] of this.entries) {
+            const [id, size, zoom, width, height, column, row,
+                chunkWidth, chunkHeight] = JSON.parse(key);
+            if (id !== imageId || size !== sourceSizeBytes || zoom !== zoomIndex
+                    || width !== viewportWidth || height !== viewportHeight) continue;
+            if (matches.length === 128) break;
+            entry.pins++;
+            matches.push({key, column, row, width: chunkWidth, height: chunkHeight});
+        }
+        return matches;
+    }
+
+    release(keys) {
+        for (const key of keys) {
+            const entry = this.entries.get(key);
+            if (entry && entry.pins > 0) entry.pins--;
+        }
+    }
+
     /** Devuelve true si conserva el bitmap; el llamador cierra los rechazados. */
     put(key, bitmap, decodeMillis) {
         const bytes = bitmap.width * bitmap.height * 4;
@@ -35,12 +57,13 @@ export class BitmapCache {
         }
         const cost = Math.max(1, Number.isFinite(decodeMillis) ? decodeMillis : 1);
         while (this.currentBytes + bytes > this.maximumBytes) {
-            this.evictLowestPriority();
+            if (!this.evictLowestPriority()) return false;
         }
         this.entries.set(key, {
             bitmap,
             bytes,
             cost,
+            pins: 0,
             priority: this.age + cost / (bytes / 1048576)
         });
         this.currentBytes += bytes;
@@ -51,17 +74,19 @@ export class BitmapCache {
         let victimKey = null;
         let victim = null;
         for (const [key, entry] of this.entries) {
+            if (entry.pins > 0) continue;
             if (!victim || entry.priority < victim.priority) {
                 victimKey = key;
                 victim = entry;
             }
         }
-        if (!victim) throw new Error("La caché no tiene una entrada para expulsar");
+        if (!victim) return false;
         this.age = victim.priority;
         this.entries.delete(victimKey);
         this.currentBytes -= victim.bytes;
         victim.bitmap.close();
         this.evictions++;
+        return true;
     }
 
     clear() {

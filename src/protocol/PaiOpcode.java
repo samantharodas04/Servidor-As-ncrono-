@@ -12,7 +12,9 @@ public enum PaiOpcode {
     VIEW_END(6),
     CHUNK_PNG(7),
     VIEW_ERROR(8),
-    CHUNK_ACK(9);
+    CHUNK_ACK(9),
+    VIEW_CACHED(10),
+    CHUNK_REF(11);
 
     private final int code;
 

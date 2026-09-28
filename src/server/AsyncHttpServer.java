@@ -1,5 +1,6 @@
 package server;
 
+import config.ServerConfig;
 import image.ImageSource;
 import image.RenderedChunk;
 import protocol.ChunkAckCodec;
@@ -10,6 +11,7 @@ import protocol.ViewResponseCodec;
 import protocol.ViewMessageCodec;
 import view.ViewCoordinator;
 import view.ViewProcessor;
+import view.PlannedChunk;
 import view.ViewProgress;
 import view.ViewRegion;
 import view.ViewRequest;
@@ -38,13 +40,7 @@ import java.util.concurrent.RejectedExecutionException;
 public final class AsyncHttpServer implements AutoCloseable {
     private static final int HTTP_BUFFER_BYTES = 16 * 1024;
     private static final int WEBSOCKET_BUFFER_BYTES = 4 * 1024;
-    private static final int CHUNK_SIZE = 512;
-    private static final int SERVER_THREADS = 2;
-    private static final int VIEW_WORKERS = 2;
-    private static final long MAX_CACHE_BYTES = 32L * 1024L * 1024L;
-    private static final long MAX_QUEUED_WRITE_BYTES = 32L * 1024L * 1024L;
-
-    private final int port;
+    private final ServerConfig config;
     private final Path webRoot;
     private final List<ImageSource> images;
     private final Map<AsynchronousSocketChannel, ClientSession> sessions;
@@ -55,15 +51,13 @@ public final class AsyncHttpServer implements AutoCloseable {
     private AsynchronousServerSocketChannel serverChannel;
     private volatile boolean running;
 
-    public AsyncHttpServer(int port, Path webRoot, List<ImageSource> images) {
-        if (port < 1 || port > 65_535) {
-            throw new IllegalArgumentException("Puerto fuera de rango");
-        }
-        this.port = port;
+    public AsyncHttpServer(ServerConfig config, Path webRoot, List<ImageSource> images) {
+        this.config = java.util.Objects.requireNonNull(config, "config");
         this.webRoot = webRoot.toAbsolutePath().normalize();
         this.images = List.copyOf(images);
         this.sessions = new ConcurrentHashMap<>();
-        this.viewProcessor = new ViewProcessor(images, VIEW_WORKERS, MAX_CACHE_BYTES);
+        this.viewProcessor = new ViewProcessor(images, config.viewWorkers(), config.cacheBytes(),
+                config.normalJpegQuality());
         this.thumbnails = new ThumbnailService();
     }
 
@@ -76,11 +70,11 @@ public final class AsyncHttpServer implements AutoCloseable {
         }
 
         channelGroup = AsynchronousChannelGroup.withFixedThreadPool(
-                SERVER_THREADS,
+                config.serverThreads(),
                 Executors.defaultThreadFactory()
         );
         serverChannel = AsynchronousServerSocketChannel.open(channelGroup)
-                .bind(new InetSocketAddress(port));
+                .bind(new InetSocketAddress(config.port()));
         running = true;
         acceptNext();
     }
@@ -313,10 +307,10 @@ public final class AsyncHttpServer implements AutoCloseable {
             return true;
         }
 
-        ViewRequest request = ViewMessageCodec.decode(frame.payload(), CHUNK_SIZE);
+        ViewRequest request = ViewMessageCodec.decode(frame.payload(), config.chunkSize());
         System.out.printf(
                 "[PAI] VIEW recibido | generationId=%d | imageId=%s | zoomIndex=%d "
-                        + "| center=(%d,%d) | viewport=%dx%d | chunkSize=%d%n",
+                        + "| center=(%d,%d) | viewport=%dx%d | chunkSize=%d | disponibles=%d%n",
                 request.generationId(),
                 request.imageId(),
                 request.zoomIndex(),
@@ -324,7 +318,8 @@ public final class AsyncHttpServer implements AutoCloseable {
                 request.centerY(),
                 request.viewportWidth(),
                 request.viewportHeight(),
-                request.chunkSize()
+                request.chunkSize(),
+                request.cachedChunks().size()
         );
 
         ClientSession session = requireSession(client);
@@ -347,6 +342,14 @@ public final class AsyncHttpServer implements AutoCloseable {
                         if (isCurrentSession(session, current.generationId())) {
                             session.flow.sendChunk(current.generationId(), index,
                                     ViewResponseCodec.encodeChunk(current, index, chunk));
+                        }
+                    }
+
+                    @Override
+                    public void onReference(ViewRequest current, int index,
+                                            PlannedChunk chunk) throws IOException {
+                        if (isCurrentSession(session, current.generationId())) {
+                            session.send(ViewResponseCodec.encodeChunkRef(current, index, chunk));
                         }
                     }
                 },
@@ -384,7 +387,7 @@ public final class AsyncHttpServer implements AutoCloseable {
 
         System.out.printf(
                 "[VIEW] enviada | generationId=%d | imageId=%s | zoomIndex=%d "
-                        + "| region=(%d,%d %dx%d) | chunks=%d | cache=%d "
+                        + "| region=(%d,%d %dx%d) | chunks=%d | cliente=%d | cache=%d "
                         + "| generados=%d | imageBytes=%d | preparar%s=%dms "
                         + "| chunks%s=%dms | ackWait=%dms | total=%dms%n",
                 generationId,
@@ -394,7 +397,8 @@ public final class AsyncHttpServer implements AutoCloseable {
                 result.region().y(),
                 result.region().width(),
                 result.region().height(),
-                result.chunks().size(),
+                result.plan().chunks().size(),
+                result.reusedChunks(),
                 result.cacheHits(),
                 result.generatedChunks(),
                 result.totalChunkBytes(),
@@ -613,7 +617,7 @@ public final class AsyncHttpServer implements AutoCloseable {
                 if (closed) {
                     throw new IOException("La sesion PAI ya esta cerrada");
                 }
-                if (payload.length > MAX_QUEUED_WRITE_BYTES - queuedBytes) {
+                if (payload.length > config.writeQueueBytes() - queuedBytes) {
                     throw new IOException("La cola de salida excedio su limite");
                 }
 

@@ -1,3 +1,4 @@
+import config.ServerConfig;
 import image.ImageCatalog;
 import image.ImageSource;
 import server.AsyncHttpServer;
@@ -13,7 +14,7 @@ import java.util.concurrent.CountDownLatch;
  * El navegador recibe el resultado en web/app.js.
  */
 public final class Main {
-    private static final int DEFAULT_PORT = 8080;
+    private static final Path CONFIG_FILE = Path.of("config", "server.properties");
     private static final Path WEB_ROOT = Path.of("web");
     private static final Path ORIGINALS_ROOT = Path.of("images", "originals");
 
@@ -22,11 +23,13 @@ public final class Main {
 
     public static void main(String[] args) throws IOException {
         // 1. Lee el puerto y solo los encabezados de images/originals; no carga los pixeles.
-        int port = readPort(args);
+        ServerConfig config = ServerConfig.load(CONFIG_FILE);
+        if (args.length != 0) config = config.withPort(readPort(args));
+        int port = config.port();
         List<ImageSource> images = new ImageCatalog(ORIGINALS_ROOT).discover();
 
         // 2. Crea HTTP + WebSocket; los derivados de images/processed se eligen al pedir VIEW.
-        AsyncHttpServer server = new AsyncHttpServer(port, WEB_ROOT, images);
+        AsyncHttpServer server = new AsyncHttpServer(config, WEB_ROOT, images);
         CountDownLatch stopped = new CountDownLatch(1);
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
@@ -51,9 +54,6 @@ public final class Main {
     }
 
     private static int readPort(String[] args) {
-        if (args.length == 0) {
-            return DEFAULT_PORT;
-        }
         if (args.length != 2 || !"-port".equals(args[0])) {
             throw new IllegalArgumentException("Uso: java Main [-port PUERTO]");
         }
