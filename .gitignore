@@ -1,4 +1,5 @@
 out/
+debug-output/
 images/processed/*
 !images/processed/.gitkeep
 # Imagen gigante de prueba - no subir a GitHub
@@ -8,4 +9,4 @@ images/originals/eso1242a.psb
 out/
 
 # Tiles generados / cache
-images/processed/
+images/

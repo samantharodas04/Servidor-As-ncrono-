@@ -30,8 +30,9 @@ public final class WebSocketUtil {
             out.write(len & 0xFF);
         } else {
             out.write(127);
+            long longLength = Integer.toUnsignedLong(len);
             for (int i = 7; i >= 0; i--) {
-                out.write((len >>> (8 * i)) & 0xFF);
+                out.write((int) ((longLength >>> (8 * i)) & 0xFF));
             }
         }
         out.writeBytes(payload);
@@ -45,6 +46,10 @@ public final class WebSocketUtil {
 
             int b1 = buffer.get() & 0xFF;
             int b2 = buffer.get() & 0xFF;
+            boolean finalFrame = (b1 & 0x80) != 0;
+            if ((b1 & 0x70) != 0) {
+                throw new IllegalArgumentException("Los bits RSV del frame deben ser cero");
+            }
             boolean masked = (b2 & 0x80) != 0;
             long len = b2 & 0x7F;
 
@@ -54,6 +59,9 @@ public final class WebSocketUtil {
             } else if (len == 127) {
                 if (buffer.remaining() < 8) return null;
                 len = buffer.getLong();
+                if (len < 0) {
+                    throw new IllegalArgumentException("Longitud WebSocket invalida");
+                }
             }
 
             byte[] mask = null;
@@ -81,7 +89,13 @@ public final class WebSocketUtil {
             rest.flip();
             buffer.put(rest);
 
-            return new DecodedFrame((byte)(b1 & 0x0F), payload, consumed);
+            return new DecodedFrame(
+                    (byte) (b1 & 0x0F),
+                    payload,
+                    consumed,
+                    finalFrame,
+                    masked
+            );
         } finally {
             if (buffer.limit() != buffer.capacity()) {
                 buffer.position(buffer.limit());
@@ -90,5 +104,11 @@ public final class WebSocketUtil {
         }
     }
 
-    public record DecodedFrame(byte opcode, byte[] payload, int consumed) {}
+    public record DecodedFrame(
+            byte opcode,
+            byte[] payload,
+            int consumed,
+            boolean finalFrame,
+            boolean masked
+    ) {}
 }

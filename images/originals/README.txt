@@ -1,17 +1,17 @@
-COLOQUE AQUI LAS IMAGENES FUENTE.
+COLOQUE AQUI LAS IMAGENES ORIGINALES.
 
-Formatos reconocidos: JPG, JPEG, PNG, TIF, TIFF y PSB.
+Formatos reconocidos: JPG, JPEG, PNG, TIF, TIFF, PSB, WEBP y AVIF.
 
-Para la imagen gigante del proyecto:
-  eso1242a.psb
+Main descubre los originales y genera bajo demanda solo los chunks solicitados.
+Para fuentes no JPEG gigantes puede prepararse una vista general y un BigTIFF
+mosaico de resolucion completa en images/processed; no es una piramide.
 
-Copiela dentro de esta carpeta y ejecute desde la raiz del proyecto:
+Desde la raiz del proyecto:
+
   make check-tools
-  make prepare
+  make prepare-image IMAGE=ID  # solo si una fuente gigante lo necesita
+  make prepare-overview IMAGE=ID  # solo vista general
   make run
 
-IMPORTANTE:
-- PSB/TIFF gigante se procesa con ImageMagick instalado localmente.
-- La primera preparacion puede tardar y utilizar bastante espacio en disco.
-- Despues se reutiliza images/processed y el servidor arranca rapidamente.
-- No ejecute make clean-tiles si no desea volver a procesar el PSB.
+La imagen se selecciona desde el navegador. PSB requiere que libvips pueda
+abrir el archivo concreto; el nombre de extension no basta.

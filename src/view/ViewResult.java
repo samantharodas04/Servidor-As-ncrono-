@@ -1,0 +1,49 @@
+package view;
+
+import image.ImageSource;
+import image.RenderedChunk;
+
+import java.util.List;
+import java.util.Objects;
+
+/** Resultado completo; chunks contiene solo imagenes enviadas, no referencias. */
+public record ViewResult(
+        ViewRequest request,
+        ImageSource source,
+        ZoomLevel zoomLevel,
+        ViewRegion region,
+        ViewRegion preparedRegion,
+        ViewChunkPlan plan,
+        List<RenderedChunk> chunks,
+        int reusedChunks,
+        int cacheHits,
+        int generatedChunks,
+        boolean individualPreparation,
+        long preparationMillis,
+        long chunkMillis,
+        long totalMillis
+) {
+    public ViewResult {
+        Objects.requireNonNull(request, "request");
+        Objects.requireNonNull(source, "source");
+        Objects.requireNonNull(zoomLevel, "zoomLevel");
+        Objects.requireNonNull(region, "region");
+        Objects.requireNonNull(preparedRegion, "preparedRegion");
+        Objects.requireNonNull(plan, "plan");
+        chunks = List.copyOf(chunks);
+        if (reusedChunks < 0 || chunks.size() + reusedChunks != plan.chunks().size()) {
+            throw new IllegalArgumentException("Conteo de chunks reutilizados inconsistente");
+        }
+        if (cacheHits < 0 || generatedChunks < 0
+                || cacheHits + generatedChunks != chunks.size()) {
+            throw new IllegalArgumentException("Conteo de cache y generacion inconsistente");
+        }
+        if (preparationMillis < 0 || chunkMillis < 0 || totalMillis < 0) {
+            throw new IllegalArgumentException("Los tiempos no pueden ser negativos");
+        }
+    }
+
+    public long totalChunkBytes() {
+        return chunks.stream().mapToLong(RenderedChunk::byteLength).sum();
+    }
+}

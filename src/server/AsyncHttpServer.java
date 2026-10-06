@@ -1,146 +1,219 @@
 package server;
 
-import image.ImageManager;
-import protocol.IrpProtocol;
+import config.ServerConfig;
+import image.ImageSource;
+import image.RenderedChunk;
+import protocol.ChunkAckCodec;
+import protocol.ImageCatalogCodec;
+import protocol.PaiOpcode;
+import protocol.PaiProtocol;
+import protocol.ViewResponseCodec;
+import protocol.ViewMessageCodec;
+import view.ViewCoordinator;
+import view.ViewProcessor;
+import view.PlannedChunk;
+import view.ViewProgress;
+import view.ViewRegion;
+import view.ViewRequest;
+import view.ViewResult;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
-import java.nio.channels.*;
+import java.nio.channels.AsynchronousChannelGroup;
+import java.nio.channels.AsynchronousServerSocketChannel;
+import java.nio.channels.AsynchronousSocketChannel;
+import java.nio.channels.CompletionHandler;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.*;
-import java.util.*;
-import java.util.concurrent.*;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayDeque;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.TreeMap;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 
-public class AsyncHttpServer {
-    private final int port;
+/** Servidor HTTP asincrono que recibe mensajes binarios PAI en /pai. */
+public final class AsyncHttpServer implements AutoCloseable {
+    private static final int HTTP_BUFFER_BYTES = 16 * 1024;
+    private static final int WEBSOCKET_BUFFER_BYTES = 4 * 1024;
+    private final ServerConfig config;
     private final Path webRoot;
-    private final ImageManager imageManager;
-    private AsynchronousChannelGroup group;
-    private AsynchronousServerSocketChannel server;
-    private final ExecutorService workers = Executors.newFixedThreadPool(
-            Math.max(4, Runtime.getRuntime().availableProcessors())
-    );
+    private final List<ImageSource> images;
+    private final Map<AsynchronousSocketChannel, ClientSession> sessions;
+    private final ViewProcessor viewProcessor;
+    private final ThumbnailService thumbnails;
 
-    public AsyncHttpServer(int port, String webRoot, ImageManager imageManager) {
-        this.port = port;
-        this.webRoot = Paths.get(webRoot).toAbsolutePath().normalize();
-        this.imageManager = imageManager;
+    private AsynchronousChannelGroup channelGroup;
+    private AsynchronousServerSocketChannel serverChannel;
+    private volatile boolean running;
+
+    public AsyncHttpServer(ServerConfig config, Path webRoot, List<ImageSource> images) {
+        this.config = java.util.Objects.requireNonNull(config, "config");
+        this.webRoot = webRoot.toAbsolutePath().normalize();
+        this.images = List.copyOf(images);
+        this.sessions = new ConcurrentHashMap<>();
+        this.viewProcessor = new ViewProcessor(images, config.viewWorkers(), config.cacheBytes(),
+                config.normalJpegQuality());
+        this.thumbnails = new ThumbnailService();
     }
 
-    public void start() throws Exception {
-        group = AsynchronousChannelGroup.withFixedThreadPool(
-                Math.max(4, Runtime.getRuntime().availableProcessors()),
+    public synchronized void start() throws IOException {
+        if (running) {
+            throw new IllegalStateException("El servidor ya esta iniciado");
+        }
+        if (!Files.isDirectory(webRoot)) {
+            throw new IOException("No existe el directorio web: " + webRoot);
+        }
+
+        channelGroup = AsynchronousChannelGroup.withFixedThreadPool(
+                config.serverThreads(),
                 Executors.defaultThreadFactory()
         );
-        server = AsynchronousServerSocketChannel.open(group)
-                .bind(new InetSocketAddress(port));
+        serverChannel = AsynchronousServerSocketChannel.open(channelGroup)
+                .bind(new InetSocketAddress(config.port()));
+        running = true;
         acceptNext();
     }
 
-    public void stop() throws Exception {
-        if (server != null) server.close();
-        if (group != null) group.shutdownNow();
-        workers.shutdownNow();
-    }
-
     private void acceptNext() {
-        server.accept(null, new CompletionHandler<>() {
+        if (!running) {
+            return;
+        }
+        serverChannel.accept(null, new CompletionHandler<>() {
             @Override
             public void completed(AsynchronousSocketChannel client, Object attachment) {
                 acceptNext();
-                readHttp(client);
+                readHttpRequest(client);
             }
 
             @Override
-            public void failed(Throwable exc, Object attachment) {
-                if (server != null && server.isOpen()) {
-                    exc.printStackTrace();
+            public void failed(Throwable failure, Object attachment) {
+                if (running) {
+                    System.err.println("No se pudo aceptar una conexion: " + failure.getMessage());
                     acceptNext();
                 }
             }
         });
     }
 
-    private void readHttp(AsynchronousSocketChannel client) {
-        ByteBuffer buffer = ByteBuffer.allocate(16384);
+    private void readHttpRequest(AsynchronousSocketChannel client) {
+        ByteBuffer buffer = ByteBuffer.allocate(HTTP_BUFFER_BYTES);
         client.read(buffer, buffer, new CompletionHandler<>() {
             @Override
-            public void completed(Integer bytes, ByteBuffer buf) {
-                if (bytes == -1) {
-                    close(client);
+            public void completed(Integer bytesRead, ByteBuffer requestBuffer) {
+                if (bytesRead == null || bytesRead < 0) {
+                    closeClient(client);
                     return;
                 }
-                String raw = new String(buf.array(), 0, buf.position(), StandardCharsets.ISO_8859_1);
+
+                String raw = new String(
+                        requestBuffer.array(),
+                        0,
+                        requestBuffer.position(),
+                        StandardCharsets.ISO_8859_1
+                );
                 if (!raw.contains("\r\n\r\n")) {
-                    client.read(buf, buf, this);
+                    if (!requestBuffer.hasRemaining()) {
+                        writeAndClose(client, httpResponse(
+                                431,
+                                "text/plain; charset=utf-8",
+                                "Cabeceras demasiado grandes".getBytes(StandardCharsets.UTF_8)
+                        ));
+                    } else {
+                        client.read(requestBuffer, requestBuffer, this);
+                    }
                     return;
                 }
-                handleHttp(client, raw);
+
+                handleHttpRequest(client, raw);
             }
 
             @Override
-            public void failed(Throwable exc, ByteBuffer attachment) {
-                close(client);
+            public void failed(Throwable failure, ByteBuffer requestBuffer) {
+                closeClient(client);
             }
         });
     }
 
-    private void handleHttp(AsynchronousSocketChannel client, String raw) {
-        workers.submit(() -> {
-            try {
-                String[] lines = raw.split("\r\n");
-                String[] requestLine = lines[0].split(" ");
-                if (requestLine.length < 2) {
-                    writeAndClose(client, response(400, "text/plain", "Bad Request".getBytes(StandardCharsets.UTF_8)));
-                    return;
-                }
-
-                String method = requestLine[0];
-                String path = requestLine[1];
-                System.out.println("[HTTP] " + method + " " + path);
-                Map<String, String> headers = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
-                for (int i = 1; i < lines.length; i++) {
-                    int colon = lines[i].indexOf(':');
-                    if (colon > 0) {
-                        headers.put(lines[i].substring(0, colon).trim(),
-                                lines[i].substring(colon + 1).trim());
-                    }
-                }
-
-                if ("/irp".equals(path)
-                        && "websocket".equalsIgnoreCase(headers.getOrDefault("Upgrade", ""))) {
-                    upgradeWebSocket(client, headers);
-                    return;
-                }
-
-                if (!"GET".equalsIgnoreCase(method)) {
-                    writeAndClose(client, response(405, "text/plain", "Method Not Allowed".getBytes(StandardCharsets.UTF_8)));
-                    return;
-                }
-
-                if ("/".equals(path)) path = "/index.html";
-                Path requested = webRoot.resolve(path.substring(1)).normalize();
-                if (!requested.startsWith(webRoot) || !Files.exists(requested) || Files.isDirectory(requested)) {
-                    writeAndClose(client, response(404, "text/plain", "Not Found".getBytes(StandardCharsets.UTF_8)));
-                    return;
-                }
-
-                byte[] body = Files.readAllBytes(requested);
-                writeAndClose(client, response(200, mime(requested), body));
-
-            } catch (Exception e) {
-                e.printStackTrace();
-                writeAndClose(client, response(500, "text/plain",
-                        "Internal Server Error".getBytes(StandardCharsets.UTF_8)));
+    // 4. HTTP entrega web/*; /pai convierte la conexión en WebSocket.
+    private void handleHttpRequest(AsynchronousSocketChannel client, String raw) {
+        try {
+            String[] lines = raw.split("\r\n");
+            String[] requestLine = lines[0].split(" ");
+            if (requestLine.length != 3) {
+                writeAndClose(client, textResponse(400, "Solicitud HTTP invalida"));
+                return;
             }
-        });
+
+            String method = requestLine[0];
+            String target = requestLine[1];
+            String path = target.split("\\?", 2)[0];
+            Map<String, String> headers = parseHeaders(lines);
+            System.out.printf("[HTTP] %s %s%n", method, path);
+
+            if ("/pai".equals(path) && isWebSocketRequest(method, headers)) {
+                upgradeWebSocket(client, headers);
+                return;
+            }
+
+            if (!"GET".equals(method)) {
+                writeAndClose(client, textResponse(405, "Metodo no permitido"));
+                return;
+            }
+
+            if (path.startsWith("/thumbnail/")) {
+                serveThumbnail(client, path.substring("/thumbnail/".length()));
+                return;
+            }
+
+            serveStaticFile(client, path);
+        } catch (Exception e) {
+            System.err.println("Solicitud rechazada: " + e.getMessage());
+            writeAndClose(client, textResponse(400, "Solicitud invalida"));
+        }
     }
 
-    private void upgradeWebSocket(AsynchronousSocketChannel client, Map<String, String> headers) throws Exception {
+    private Map<String, String> parseHeaders(String[] lines) {
+        Map<String, String> headers = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+        for (int index = 1; index < lines.length; index++) {
+            int separator = lines[index].indexOf(':');
+            if (separator > 0) {
+                headers.put(
+                        lines[index].substring(0, separator).trim(),
+                        lines[index].substring(separator + 1).trim()
+                );
+            }
+        }
+        return headers;
+    }
+
+    private boolean isWebSocketRequest(String method, Map<String, String> headers) {
+        return "GET".equals(method)
+                && "websocket".equalsIgnoreCase(headers.getOrDefault("Upgrade", ""))
+                && containsToken(headers.getOrDefault("Connection", ""), "upgrade");
+    }
+
+    private boolean containsToken(String header, String expected) {
+        for (String token : header.split(",")) {
+            if (expected.equalsIgnoreCase(token.trim())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void upgradeWebSocket(
+            AsynchronousSocketChannel client,
+            Map<String, String> headers
+    ) throws Exception {
+        String version = headers.get("Sec-WebSocket-Version");
         String key = headers.get("Sec-WebSocket-Key");
-        if (key == null) {
-            writeAndClose(client, response(400, "text/plain", "Missing WebSocket key".getBytes(StandardCharsets.UTF_8)));
+        if (!"13".equals(version) || key == null || key.isBlank()) {
+            writeAndClose(client, textResponse(400, "Handshake WebSocket invalido"));
             return;
         }
 
@@ -148,136 +221,477 @@ public class AsyncHttpServer {
         String response = "HTTP/1.1 101 Switching Protocols\r\n"
                 + "Upgrade: websocket\r\n"
                 + "Connection: Upgrade\r\n"
-                + "Sec-WebSocket-Accept: " + accept + "\r\n\r\n";
+                + "Sec-WebSocket-Accept: " + accept + "\r\n"
+                + "\r\n";
 
-        ByteBuffer out = ByteBuffer.wrap(response.getBytes(StandardCharsets.ISO_8859_1));
-        writeAll(client, out, () -> startWebSocket(client));
+        writeAll(
+                client,
+                ByteBuffer.wrap(response.getBytes(StandardCharsets.ISO_8859_1)),
+                () -> {
+                    sessions.put(client, new ClientSession(client));
+                    System.out.println("[WebSocket] Handshake PAI completado");
+                    readWebSocketFrames(client);
+                }
+        );
     }
 
-    private void startWebSocket(AsynchronousSocketChannel client) {
-        IrpProtocol protocol = new IrpProtocol(imageManager);
-        ByteBuffer buffer = ByteBuffer.allocate(1024 * 1024);
-        processWebSocketBuffer(client, buffer, protocol);
-    }
-
-    /*
-     * Primero intenta consumir frames que ya están almacenados en el buffer.
-     * Esto es importante porque un navegador puede enviar varios comandos TILE
-     * en un mismo paquete TCP. Solo se vuelve a leer del socket cuando no existe
-     * un frame completo pendiente de procesar.
-     */
-    private void processWebSocketBuffer(AsynchronousSocketChannel client,
-                                        ByteBuffer buffer,
-                                        IrpProtocol protocol) {
-        WebSocketUtil.DecodedFrame frame = WebSocketUtil.tryDecode(buffer);
-
-        if (frame != null) {
-            if (frame.opcode() == 0x8) {
-                close(client);
-                return;
-            }
-
-            if (frame.opcode() == 0x1) {
-                String message = new String(frame.payload(), StandardCharsets.UTF_8);
-                String firstLine = message.replace("\r", "").split("\n", 2)[0];
-                System.out.println("[IRP] " + firstLine);
-                List<IrpProtocol.Response> responses = protocol.handle(message);
-                sendResponses(client, responses, 0,
-                        () -> processWebSocketBuffer(client, buffer, protocol));
-                return;
-            }
-
-            processWebSocketBuffer(client, buffer, protocol);
-            return;
-        }
-
-        client.read(buffer, buffer, new CompletionHandler<>() {
+    /** Mantiene una sola lectura asincrona y conserva frames que lleguen incompletos. */
+    private void readWebSocketFrames(AsynchronousSocketChannel client) {
+        ByteBuffer input = ByteBuffer.allocate(WEBSOCKET_BUFFER_BYTES);
+        client.read(input, input, new CompletionHandler<>() {
             @Override
-            public void completed(Integer bytes, ByteBuffer buf) {
-                if (bytes == -1) {
-                    close(client);
+            public void completed(Integer bytesRead, ByteBuffer buffer) {
+                if (bytesRead == null || bytesRead < 0) {
+                    closeClient(client);
                     return;
                 }
-                processWebSocketBuffer(client, buf, protocol);
+
+                try {
+                    WebSocketUtil.DecodedFrame frame;
+                    while ((frame = WebSocketUtil.tryDecode(buffer)) != null) {
+                        if (!handleWebSocketFrame(client, frame)) {
+                            return;
+                        }
+                    }
+
+                    if (!buffer.hasRemaining()) {
+                        rejectWebSocket(client, "Frame demasiado grande");
+                        return;
+                    }
+                    client.read(buffer, buffer, this);
+                } catch (IOException | IllegalArgumentException e) {
+                    rejectWebSocket(client, e.getMessage());
+                }
             }
 
             @Override
-            public void failed(Throwable exc, ByteBuffer attachment) {
-                close(client);
+            public void failed(Throwable failure, ByteBuffer buffer) {
+                closeClient(client);
             }
         });
     }
 
-    private void sendResponses(AsynchronousSocketChannel client,
-                               List<IrpProtocol.Response> responses,
-                               int index,
-                               Runnable done) {
-        if (index >= responses.size()) {
-            done.run();
-            return;
+    /** Devuelve false cuando el frame cierra o invalida esta conexion. */
+    // 5. Decodifica LIST_IMAGES o VIEW; VIEW sigue en ViewCoordinator.submit (paso 6).
+    private boolean handleWebSocketFrame(
+            AsynchronousSocketChannel client,
+            WebSocketUtil.DecodedFrame frame
+    ) throws IOException {
+        if (!frame.masked()) {
+            throw new IOException("El frame del cliente debe venir enmascarado");
         }
-        IrpProtocol.Response r = responses.get(index);
-        byte opcode = r.binary ? (byte) 0x2 : (byte) 0x1;
-        ByteBuffer frame = WebSocketUtil.frame(opcode, r.data);
-        writeAll(client, frame, () -> sendResponses(client, responses, index + 1, done));
+        if (!frame.finalFrame()) {
+            throw new IOException("Los frames fragmentados aun no son soportados");
+        }
+
+        int opcode = Byte.toUnsignedInt(frame.opcode());
+        if (opcode == 0x8) {
+            closeClient(client);
+            return false;
+        }
+        if (opcode != 0x2) {
+            throw new IOException("Se esperaba un frame binario WebSocket");
+        }
+
+        if (ImageCatalogCodec.isListImagesRequest(frame.payload())) {
+            byte[] response = ImageCatalogCodec.encodeImageList(images);
+            requireSession(client).send(response);
+            System.out.println("[PAI] IMAGE_LIST encolado | imagenes=" + images.size());
+            return true;
+        }
+
+        if (frame.payload().length >= PaiProtocol.HEADER_BYTES
+                && Byte.toUnsignedInt(frame.payload()[4]) == PaiOpcode.CHUNK_ACK.code()) {
+            ChunkAckCodec.Ack ack = ChunkAckCodec.decode(frame.payload());
+            requireSession(client).flow.acknowledge(ack.generationId(), ack.chunkIndex());
+            return true;
+        }
+
+        ViewRequest request = ViewMessageCodec.decode(frame.payload(), config.chunkSize());
+        System.out.printf(
+                "[PAI] VIEW recibido | generationId=%d | imageId=%s | zoomIndex=%d "
+                        + "| center=(%d,%d) | viewport=%dx%d | chunkSize=%d | disponibles=%d%n",
+                request.generationId(),
+                request.imageId(),
+                request.zoomIndex(),
+                request.centerX(),
+                request.centerY(),
+                request.viewportWidth(),
+                request.viewportHeight(),
+                request.chunkSize(),
+                request.cachedChunks().size()
+        );
+
+        ClientSession session = requireSession(client);
+        session.flow.begin(request.generationId());
+        session.coordinator.submit(
+                request,
+                new ViewProgress() {
+                    @Override
+                    public void onStart(ViewRequest current, ViewRegion region, int chunkCount)
+                            throws IOException {
+                        if (isCurrentSession(session, current.generationId())) {
+                            session.send(ViewResponseCodec.encodeViewStart(
+                                    current, region, chunkCount));
+                        }
+                    }
+
+                    @Override
+                    public void onChunk(ViewRequest current, int index,
+                                        RenderedChunk chunk) throws IOException {
+                        if (isCurrentSession(session, current.generationId())) {
+                            session.flow.sendChunk(current.generationId(), index,
+                                    ViewResponseCodec.encodeChunk(current, index, chunk));
+                        }
+                    }
+
+                    @Override
+                    public void onReference(ViewRequest current, int index,
+                                            PlannedChunk chunk) throws IOException {
+                        if (isCurrentSession(session, current.generationId())) {
+                            session.send(ViewResponseCodec.encodeChunkRef(current, index, chunk));
+                        }
+                    }
+                },
+                result -> sendViewEnd(session, result),
+                failure -> printViewFailure(session, request, failure)
+        );
+        return true;
     }
 
-    private byte[] response(int code, String contentType, byte[] body) {
-        String reason = switch (code) {
+    private ClientSession requireSession(AsynchronousSocketChannel client) throws IOException {
+        ClientSession session = sessions.get(client);
+        if (session == null) {
+            throw new IOException("La conexion no tiene una sesion PAI activa");
+        }
+        return session;
+    }
+
+    // 7. START y chunks salen durante render(); END confirma la vista completa.
+    private void sendViewEnd(ClientSession session, ViewResult result) {
+        long generationId = result.request().generationId();
+        if (!isCurrentSession(session, generationId)) {
+            return;
+        }
+
+        long ackWaitStarted = System.nanoTime();
+        try {
+            if (!session.flow.awaitDrained(generationId)
+                    || !isCurrentSession(session, generationId)) return;
+            session.send(ViewResponseCodec.encodeViewEnd(result));
+        } catch (IOException failure) {
+            printViewFailure(session, result.request(), failure);
+            return;
+        }
+        long ackWaitMillis = (System.nanoTime() - ackWaitStarted) / 1_000_000L;
+
+        System.out.printf(
+                "[VIEW] enviada | generationId=%d | imageId=%s | zoomIndex=%d "
+                        + "| region=(%d,%d %dx%d) | chunks=%d | cliente=%d | cache=%d "
+                        + "| generados=%d | imageBytes=%d | preparar%s=%dms "
+                        + "| chunks%s=%dms | ackWait=%dms | total=%dms%n",
+                generationId,
+                result.source().id(),
+                result.request().zoomIndex(),
+                result.region().x(),
+                result.region().y(),
+                result.region().width(),
+                result.region().height(),
+                result.plan().chunks().size(),
+                result.reusedChunks(),
+                result.cacheHits(),
+                result.generatedChunks(),
+                result.totalChunkBytes(),
+                result.individualPreparation() ? "-suma-workers" : "",
+                result.preparationMillis(),
+                result.individualPreparation() ? "-suma-workers" : "",
+                result.chunkMillis(),
+                ackWaitMillis,
+                result.totalMillis() + ackWaitMillis
+        );
+    }
+
+    private void printViewFailure(
+            ClientSession session,
+            ViewRequest request,
+            Throwable failure
+    ) {
+        if (!isCurrentSession(session, request.generationId())) {
+            return;
+        }
+        session.flow.fail(request.generationId());
+        System.err.printf(
+                "[VIEW] fallo | generationId=%d | imageId=%s | motivo=%s%n",
+                request.generationId(),
+                request.imageId(),
+                failure.getMessage()
+        );
+        try {
+            session.send(ViewResponseCodec.encodeViewError(
+                    request, "No se pudo completar la vista"));
+        } catch (IOException sendFailure) {
+            closeClient(session.client);
+        }
+    }
+
+    private boolean isCurrentSession(ClientSession session, long generationId) {
+        return sessions.get(session.client) == session
+                && session.coordinator.isCurrent(generationId);
+    }
+
+    private void rejectWebSocket(AsynchronousSocketChannel client, String reason) {
+        System.err.println("[PAI] Mensaje rechazado: " + reason);
+        closeClient(client);
+    }
+
+    private void serveStaticFile(AsynchronousSocketChannel client, String path) throws IOException {
+        String resource = "/".equals(path) ? "/index.html" : path;
+        if (!resource.startsWith("/") || resource.indexOf('\0') >= 0) {
+            writeAndClose(client, textResponse(400, "Ruta invalida"));
+            return;
+        }
+
+        Path requested = webRoot.resolve(resource.substring(1)).normalize();
+        if (!requested.startsWith(webRoot)
+                || !Files.isRegularFile(requested)) {
+            writeAndClose(client, textResponse(404, "Recurso no encontrado"));
+            return;
+        }
+
+        byte[] body = Files.readAllBytes(requested);
+        writeAndClose(client, httpResponse(200, mimeType(requested), body));
+    }
+
+    private void serveThumbnail(AsynchronousSocketChannel client, String id) {
+        ImageSource image = images.stream()
+                .filter(candidate -> candidate.id().equals(id))
+                .findFirst().orElse(null);
+        if (image == null) {
+            writeAndClose(client, textResponse(404, "Imagen no encontrada"));
+            return;
+        }
+        // libvips trabaja fuera de los hilos que aceptan HTTP y WebSocket.
+        try {
+            thumbnails.load(image).whenComplete((bytes, error) -> {
+                if (error == null) {
+                    writeAndClose(client, httpResponse(200, "image/jpeg", bytes));
+                } else {
+                    System.err.println("[THUMBNAIL] " + id + ": " + error.getMessage());
+                    writeAndClose(client, textResponse(404, "Miniatura no disponible"));
+                }
+            });
+        } catch (RejectedExecutionException overloaded) {
+            writeAndClose(client, textResponse(503, "Miniaturas ocupadas"));
+        }
+    }
+
+    private byte[] textResponse(int status, String message) {
+        return httpResponse(
+                status,
+                "text/plain; charset=utf-8",
+                message.getBytes(StandardCharsets.UTF_8)
+        );
+    }
+
+    private byte[] httpResponse(int status, String contentType, byte[] body) {
+        String reason = switch (status) {
             case 200 -> "OK";
             case 400 -> "Bad Request";
             case 404 -> "Not Found";
             case 405 -> "Method Not Allowed";
+            case 431 -> "Request Header Fields Too Large";
+            case 503 -> "Service Unavailable";
             default -> "Internal Server Error";
         };
-        String head = "HTTP/1.1 " + code + " " + reason + "\r\n"
+        String head = "HTTP/1.1 " + status + " " + reason + "\r\n"
                 + "Content-Type: " + contentType + "\r\n"
                 + "Content-Length: " + body.length + "\r\n"
-                + "Connection: close\r\n\r\n";
-        byte[] h = head.getBytes(StandardCharsets.ISO_8859_1);
-        byte[] result = new byte[h.length + body.length];
-        System.arraycopy(h, 0, result, 0, h.length);
-        System.arraycopy(body, 0, result, h.length, body.length);
-        return result;
+                + "Cache-Control: no-store\r\n"
+                + "Connection: close\r\n"
+                + "\r\n";
+        byte[] header = head.getBytes(StandardCharsets.ISO_8859_1);
+        byte[] response = new byte[header.length + body.length];
+        System.arraycopy(header, 0, response, 0, header.length);
+        System.arraycopy(body, 0, response, header.length, body.length);
+        return response;
     }
 
-    private void writeAndClose(AsynchronousSocketChannel client, byte[] data) {
-        writeAll(client, ByteBuffer.wrap(data), () -> close(client));
+    private String mimeType(Path path) {
+        String name = path.getFileName().toString().toLowerCase(Locale.ROOT);
+        if (name.endsWith(".html")) {
+            return "text/html; charset=utf-8";
+        }
+        if (name.endsWith(".js")) {
+            return "application/javascript; charset=utf-8";
+        }
+        if (name.endsWith(".css")) {
+            return "text/css; charset=utf-8";
+        }
+        return "application/octet-stream";
     }
 
-    private void writeAll(AsynchronousSocketChannel client, ByteBuffer buffer, Runnable done) {
-        client.write(buffer, buffer, new CompletionHandler<>() {
+    private void writeAndClose(AsynchronousSocketChannel client, byte[] response) {
+        writeAll(client, ByteBuffer.wrap(response), () -> closeClient(client));
+    }
+
+    private void writeAll(
+            AsynchronousSocketChannel client,
+            ByteBuffer output,
+            Runnable completed
+    ) {
+        client.write(output, output, new CompletionHandler<>() {
             @Override
-            public void completed(Integer bytes, ByteBuffer buf) {
-                if (bytes == -1) {
-                    close(client);
-                    return;
-                }
-                if (buf.hasRemaining()) {
-                    client.write(buf, buf, this);
+            public void completed(Integer bytesWritten, ByteBuffer buffer) {
+                if (bytesWritten == null || bytesWritten < 0) {
+                    closeClient(client);
+                } else if (buffer.hasRemaining()) {
+                    client.write(buffer, buffer, this);
                 } else {
-                    done.run();
+                    completed.run();
                 }
             }
 
             @Override
-            public void failed(Throwable exc, ByteBuffer attachment) {
-                close(client);
+            public void failed(Throwable failure, ByteBuffer buffer) {
+                closeClient(client);
             }
         });
     }
 
-    private String mime(Path path) {
-        String name = path.getFileName().toString().toLowerCase(Locale.ROOT);
-        if (name.endsWith(".html")) return "text/html; charset=utf-8";
-        if (name.endsWith(".js")) return "application/javascript; charset=utf-8";
-        if (name.endsWith(".css")) return "text/css; charset=utf-8";
-        if (name.endsWith(".png")) return "image/png";
-        if (name.endsWith(".jpg") || name.endsWith(".jpeg")) return "image/jpeg";
-        return "application/octet-stream";
+    private void closeClient(AsynchronousSocketChannel client) {
+        ClientSession session = sessions.remove(client);
+        if (session != null) {
+            session.close();
+        }
+        try {
+            client.close();
+        } catch (IOException ignored) {
+            // La conexion ya estaba cerrada.
+        }
     }
 
-    private void close(AsynchronousSocketChannel client) {
-        try { client.close(); } catch (IOException ignored) {}
+    @Override
+    public synchronized void close() {
+        running = false;
+        for (AsynchronousSocketChannel client : List.copyOf(sessions.keySet())) {
+            closeClient(client);
+        }
+        if (serverChannel != null) {
+            try {
+                serverChannel.close();
+            } catch (IOException ignored) {
+                // El socket de escucha ya estaba cerrado.
+            }
+        }
+        if (channelGroup != null) {
+            try {
+                channelGroup.shutdownNow();
+            } catch (IOException ignored) {
+                // El grupo asincrono ya estaba cerrado.
+            }
+        }
+        viewProcessor.close();
+        thumbnails.close();
+    }
+
+    /** Estado de una conexion: coordinador propio y una sola escritura a la vez. */
+    private final class ClientSession implements AutoCloseable {
+        private final AsynchronousSocketChannel client;
+        private final ViewCoordinator coordinator;
+        private final ViewFlowControl flow;
+        private final ArrayDeque<byte[]> pendingPayloads;
+        private long queuedBytes;
+        private boolean writing;
+        private boolean closed;
+
+        private ClientSession(AsynchronousSocketChannel client) {
+            this.client = client;
+            this.coordinator = ViewCoordinator.usingSharedProcessor(viewProcessor);
+            this.flow = new ViewFlowControl(this::send);
+            this.pendingPayloads = new ArrayDeque<>();
+        }
+
+        private void send(byte[] payload) throws IOException {
+            boolean startWriting;
+            synchronized (this) {
+                if (closed) {
+                    throw new IOException("La sesion PAI ya esta cerrada");
+                }
+                if (payload.length > config.writeQueueBytes() - queuedBytes) {
+                    throw new IOException("La cola de salida excedio su limite");
+                }
+
+                pendingPayloads.addLast(payload);
+                queuedBytes += payload.length;
+                startWriting = !writing;
+                if (startWriting) {
+                    writing = true;
+                }
+            }
+
+            if (startWriting) {
+                writeNext();
+            }
+        }
+
+        private void writeNext() {
+            byte[] payload;
+            synchronized (this) {
+                if (closed) {
+                    return;
+                }
+                payload = pendingPayloads.peekFirst();
+                if (payload == null) {
+                    writing = false;
+                    return;
+                }
+            }
+            writeFrame(WebSocketUtil.frame((byte) 0x2, payload));
+        }
+
+        private void writeFrame(ByteBuffer frame) {
+            client.write(frame, frame, new CompletionHandler<>() {
+                @Override
+                public void completed(Integer bytesWritten, ByteBuffer pendingFrame) {
+                    if (bytesWritten == null || bytesWritten < 0) {
+                        closeClient(client);
+                    } else if (pendingFrame.hasRemaining()) {
+                        client.write(pendingFrame, pendingFrame, this);
+                    } else {
+                        synchronized (ClientSession.this) {
+                            if (closed) {
+                                return;
+                            }
+                            byte[] completed = pendingPayloads.pollFirst();
+                            if (completed == null) {
+                                writing = false;
+                                return;
+                            }
+                            queuedBytes -= completed.length;
+                        }
+                        writeNext();
+                    }
+                }
+
+                @Override
+                public void failed(Throwable failure, ByteBuffer pendingFrame) {
+                    closeClient(client);
+                }
+            });
+        }
+
+        @Override
+        public void close() {
+            synchronized (this) {
+                if (closed) {
+                    return;
+                }
+                closed = true;
+                pendingPayloads.clear();
+                queuedBytes = 0;
+            }
+            flow.close();
+            coordinator.close();
+        }
     }
 }

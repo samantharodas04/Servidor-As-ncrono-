@@ -1,36 +1,72 @@
-import image.ImageManager;
+import config.ServerConfig;
+import image.ImageCatalog;
+import image.ImageSource;
 import server.AsyncHttpServer;
+
+import java.io.IOException;
+import java.nio.file.Path;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 
-public class Main {
-    public static void main(String[] args) throws Exception {
-        System.setProperty("java.awt.headless", "true");
-        int port = 8080;
-        if (args.length >= 2 && "-port".equals(args[0])) {
-            port = Integer.parseInt(args[1]);
-        }
+/**
+ * Punto de entrada. Recorrido de VIEW: AsyncHttpServer -> ViewProcessor ->
+ * PreparedSourceStore -> VipsViewPreparer -> ChunkWorkerPool -> ViewResponseCodec.
+ * El navegador recibe el resultado en web/app.js.
+ */
+public final class Main {
+    private static final Path CONFIG_FILE = Path.of("config", "server.properties");
+    private static final Path WEB_ROOT = Path.of("web");
+    private static final Path ORIGINALS_ROOT = Path.of("images", "originals");
 
-        ImageManager imageManager = new ImageManager(
-                "images/originals",
-                "images/processed",
-                512
-        );
+    private Main() {
+    }
 
-        System.out.println("Preparando imágenes disponibles...");
-        System.out.println("ImageMagick para PSB/TIFF gigante: " + (imageManager.isImageMagickAvailable() ? "DISPONIBLE" : "NO ENCONTRADO"));
-        imageManager.processAllImages();
+    public static void main(String[] args) throws IOException {
+        // 1. Lee el puerto y solo los encabezados de images/originals; no carga los pixeles.
+        ServerConfig config = ServerConfig.load(CONFIG_FILE);
+        if (args.length != 0) config = config.withPort(readPort(args));
+        int port = config.port();
+        List<ImageSource> images = new ImageCatalog(ORIGINALS_ROOT).discover();
 
-        AsyncHttpServer server = new AsyncHttpServer(port, "web", imageManager);
-        server.start();
-
-        System.out.println("Servidor iniciado en http://localhost:" + port);
-        System.out.println("WebSocket IRP disponible en ws://localhost:" + port + "/irp");
-        System.out.println("Servidor listo. Use Ctrl+C para detenerlo.");
+        // 2. Crea HTTP + WebSocket; los derivados de images/processed se eligen al pedir VIEW.
+        AsyncHttpServer server = new AsyncHttpServer(config, WEB_ROOT, images);
+        CountDownLatch stopped = new CountDownLatch(1);
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            try { server.stop(); } catch (Exception ignored) {}
-        }));
+            server.close();
+            stopped.countDown();
+        }, "server-shutdown"));
 
-        new CountDownLatch(1).await();
+        // 3. Atiende HTTP y WebSocket hasta recibir la señal de cierre.
+        server.start();
+        System.out.println("Servidor HTTP/WebSocket iniciado");
+        System.out.println("Pagina: http://localhost:" + port + "/");
+        System.out.println("WebSocket: ws://localhost:" + port + "/pai");
+        System.out.println("Imagenes disponibles: " + images.size());
+        System.out.println("Hito actual: VIEW_START, CHUNK y VIEW_END se envian al navegador.");
+
+        try {
+            stopped.await();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            server.close();
+        }
+    }
+
+    private static int readPort(String[] args) {
+        if (args.length != 2 || !"-port".equals(args[0])) {
+            throw new IllegalArgumentException("Uso: java Main [-port PUERTO]");
+        }
+
+        final int port;
+        try {
+            port = Integer.parseInt(args[1]);
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("El puerto debe ser un numero entero", e);
+        }
+        if (port < 1 || port > 65_535) {
+            throw new IllegalArgumentException("El puerto debe estar entre 1 y 65535");
+        }
+        return port;
     }
 }

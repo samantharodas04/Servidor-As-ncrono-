@@ -1,48 +1,123 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="es">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Ultra Image Viewer</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Visor PAI · Imágenes de alta resolución</title>
+    <link rel="icon" href="data:,">
     <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-<header>
-    <h1>Ultra Image Viewer</h1>
-    <p>Servidor asíncrono Java + protocolo IRP/1.0</p>
-</header>
+<div class="app-shell">
+    <header class="topbar">
+        <div class="brand">
+            <span class="brand-mark" aria-hidden="true">PAI</span>
+            <div>
+                <strong>Visor de imágenes</strong>
+                <small>Protocolo Asíncrono de Imágenes</small>
+            </div>
+        </div>
+        <a class="topbar-link" href="#protocolTests">Pruebas del protocolo</a>
+        <div class="connection-indicator" role="status">
+            <span class="status-dot" aria-hidden="true"></span>
+            <span id="connectionStatus">Conectando...</span>
+        </div>
+    </header>
 
-<main>
-    <section class="toolbar">
-        <label>Imagen:
-            <select id="imageSelect"></select>
-        </label>
+    <main class="workspace">
+        <aside class="sidebar" aria-label="Panel de imagen">
+            <div class="sidebar-heading">
+                <span class="eyebrow">EXPLORADOR</span>
+                <h1>Selecciona una imagen</h1>
+                <p>Explora el detalle sin transferir el original completo.</p>
+            </div>
 
-        <button id="minusBtn">− resolución</button>
-        <span id="levelLabel">Nivel -</span>
-        <button id="plusBtn">+ resolución</button>
-        <button id="centerBtn">Centrar</button>
-    </section>
+            <select id="imageSelect" hidden disabled aria-hidden="true"></select>
+            <p id="catalogStatus" class="muted">Cargando catálogo...</p>
+            <div id="imageChoices" class="image-choices" role="group"
+                aria-label="Elegir imagen"></div>
 
-    <section class="viewer-wrap">
-        <canvas id="viewer" width="1100" height="650"></canvas>
-    </section>
+            <button id="sendValidView" class="primary-button" disabled>Mostrar imagen</button>
 
-    <section class="stats">
-        <div><strong>Estado:</strong> <span id="status">Conectando...</span></div>
-        <div><strong>Tiles cargados:</strong> <span id="tileCount">0</span></div>
-        <div><strong>Datos recibidos:</strong> <span id="bytesCount">0 KB</span></div>
-        <div><strong>Resolución actual:</strong> <span id="resolution">-</span></div>
-        <div><strong>Procesador:</strong> <span id="processor">-</span></div>
-        <div><strong>Archivo fuente:</strong> <span id="sourceSize">-</span></div>
-    </section>
+            <div id="overviewPanel" class="minimap" aria-label="Ubicación en la imagen" hidden>
+                <span class="minimap-label">VISTA GENERAL</span>
+                <div id="overviewFrame" class="minimap-frame" role="group" tabindex="0"
+                    aria-label="Centrar vista desde la miniatura; flechas para mover"
+                    title="Clic o arrastra para centrar la vista">
+                    <canvas id="overviewCanvas" width="220" height="150"
+                        aria-label="Miniatura de la imagen completa"></canvas>
+                    <div id="overviewMarker" class="minimap-marker" aria-hidden="true"></div>
+                </div>
+            </div>
 
-    <section class="help">
-        <p>Arrastra la imagen para moverte. Cambia de nivel con los botones de resolución.
-           Cuando cambia el nivel, los tiles anteriores se eliminan del cliente.</p>
-    </section>
-</main>
+            <div class="sidebar-divider"></div>
+            <div class="info-card subtle">
+                <span class="eyebrow">CACHÉ DEL NAVEGADOR</span>
+                <p id="cacheStatus">0 piezas · 0 B / 12 MiB</p>
+                <small>GreedyDual-Size · límite de 12 MiB.</small>
+            </div>
 
-<script src="/app.js"></script>
+        </aside>
+
+        <section class="viewer-panel" aria-label="Visor">
+            <div class="viewer-toolbar">
+                <div>
+                    <span class="eyebrow">VISTA ACTIVA</span>
+                    <p id="positionStatus">Centro sin seleccionar</p>
+                </div>
+                <div class="zoom-controls" aria-label="Controles de zoom">
+                    <button id="zoomOut" class="icon-button" disabled aria-label="Alejar">−</button>
+                    <span id="zoomStatus" aria-live="polite">Zoom: sin imagen</span>
+                    <button id="zoomIn" class="icon-button" disabled aria-label="Acercar">+</button>
+                </div>
+            </div>
+
+            <div class="canvas-stage">
+                <canvas id="imageCanvas" width="1100" height="650"
+                    aria-label="Vista de la imagen seleccionada"></canvas>
+            </div>
+
+            <div class="viewer-footer">
+                <p id="viewStatus" role="status">Selecciona una imagen para comenzar.</p>
+                <p class="viewer-hint">Arrastra para moverte · Rueda o botones para cambiar de zoom</p>
+            </div>
+
+            <section id="protocolTests" class="protocol-tests" aria-labelledby="testsHeading">
+                <div class="test-heading">
+                    <div>
+                        <span class="eyebrow">PAI/1</span>
+                        <h2 id="testsHeading">Pruebas del protocolo</h2>
+                        <p>Elige un caso. Aquí verás el resultado y la vista normal se recuperará al terminar.</p>
+                    </div>
+                    <span class="test-count">4 casos</span>
+                </div>
+                <div class="test-grid">
+                    <div class="test-case">
+                        <strong>Imagen desconocida</strong>
+                        <p>Solicita un ID que no existe. Esperado: VIEW_ERROR sin desconexión.</p>
+                        <button id="sendUnknownImage" class="secondary-button protocol-test" disabled>Probar imagen desconocida</button>
+                    </div>
+                    <div class="test-case">
+                        <strong>Zoom fuera de rango</strong>
+                        <p>Solicita un nivel inexistente. Esperado: VIEW_ERROR sin desconexión.</p>
+                        <button id="sendInvalidZoom" class="secondary-button protocol-test" disabled>Probar zoom inválido</button>
+                    </div>
+                    <div class="test-case">
+                        <strong>Pérdida de un ACK</strong>
+                        <p>Omite una confirmación. Esperado: reenvío del chunk tras unos 5 segundos.</p>
+                        <button id="dropNextAck" class="secondary-button protocol-test" disabled>Probar reenvío</button>
+                    </div>
+                    <div class="test-case">
+                        <strong>Firma PAI inválida</strong>
+                        <p>Envía un mensaje corrupto. Esperado: cierre y reconexión automática.</p>
+                        <button id="sendInvalidView" class="secondary-button protocol-test" disabled>Probar reconexión</button>
+                    </div>
+                </div>
+                <p id="testStatus" class="test-status" role="status">Elige una prueba para ver su resultado.</p>
+            </section>
+        </section>
+    </main>
+</div>
+<script type="module" src="/app.js"></script>
 </body>
 </html>
