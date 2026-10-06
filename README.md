@@ -1,133 +1,28 @@
-# Servidor asíncrono de imágenes por chunks
+# Servidor asíncrono de imágenes
 
-Proyecto Java 21 en reconstrucción incremental. El objetivo actual es mostrar
-una imagen seleccionada mediante chunks JPEG generados bajo demanda, sin crear
-una galería activa ni una pirámide completa de resoluciones en disco.
+Visor de imágenes grandes desarrollado en Java 21. El navegador solicita una región mediante el protocolo binario **PAI/1** sobre un WebSocket persistente (`/pai`); el servidor procesa y envía únicamente los chunks necesarios, sin transferir el archivo original completo.
 
-## Estado actual
+El visor permite mover y ampliar la imagen. Una vista nueva cancela la anterior. Los chunks de imagen se confirman con `CHUNK_ACK`; cuando el navegador conserva un bitmap compatible, puede anunciarlo con `VIEW_CACHED` y recibir `CHUNK_REF` sin retransmitir sus bytes. El servidor también conserva chunks codificados para evitar repetir su generación.
 
-El flujo nuevo ya incluye:
+## Requisitos y ejecución
 
-- descubrimiento de originales y lectura de dimensiones;
-- niveles matemáticos de zoom;
-- regiones visibles según centro y viewport;
-- chunks fijos de hasta `512 × 512`;
-- preparación regional con libvips;
-- preparación opcional de fuentes gigantes sin crear una pirámide;
-- pool limitado de workers;
-- generaciones y cancelación de solicitudes obsoletas;
-- caché GreedyDual-Size en memoria limitada por bytes;
-- generación exclusiva de los chunks que no estén en caché;
-- mensaje binario `PAI/1 VIEW` documentado por su codec;
-- servidor HTTP/WebSocket asíncrono en `/pai`;
-- recepción de frames binarios y conversión a `ViewRequest`;
-- un `ViewCoordinator` independiente por cliente WebSocket;
-- procesamiento compartido con pool de workers y caché global;
-- respuestas binarias `VIEW_START → CHUNK... → VIEW_END`;
-- cola de escritura limitada e independiente por cliente;
-- catálogo binario `LIST_IMAGES → IMAGE_LIST` con ID, nombre, dimensiones y bytes;
-- rechazo de mensajes PAI inválidos sin detener el servidor.
-
-`Main` inicia el servidor y el frontend permite enviar un `VIEW` válido o uno
-inválido. Los botones `+` y `−`, la rueda y el arrastre sobre el canvas solicitan
-nuevas vistas con zoom o centro distintos. El arrastre envía la petición al
-soltar el puntero. El servidor procesa cada vista, envía sus chunks JPEG y el navegador
-valida la generación, la cantidad de chunks y el total de bytes recibidos.
-Después decodifica los JPEG y los dibuja en un canvas en las posiciones de
-cada chunk. El navegador usa dos carriles de decodificación y una caché
-GreedyDual-Size de bitmaps limitada a 12 MiB. Los bitmaps expulsados se cierran;
-los chunks de vistas descartadas no se decodifican si siguen pendientes.
-Al completar la primera vista general, aparece una miniatura con un rectángulo
-que indica la región visible; se actualiza al acercar o mover la imagen sin
-solicitar otra copia al servidor. Al hacer zoom, un clic en la miniatura centra
-la vista; también se puede arrastrar sobre ella para elegir el centro. Durante
-el arrastre se mueve el rectángulo y se solicita una sola vista al soltar.
-Con el foco en la miniatura, las flechas mueven la vista.
-
-Las imágenes con al menos 50 000 píxeles en algún lado permiten dos pasos
-adicionales de ampliación visual, 2× y 4×; Las Meninas termina en 1:1.
-Esos pasos agrandan los píxeles originales y no añaden detalle nuevo.
-En 2× y 4× se usa interpolación bicúbica y JPEG de calidad 92 para suavizar
-los bordes; los demás niveles conservan la interpolación bilineal y calidad 85.
-Para ocultar esos dos niveles extra en el visor, cambiar
-`ENABLE_EXTRA_GIANT_ZOOM` a `false` al inicio de `web/app.js` y recargar la
-página. El servidor sigue aceptando los niveles por protocolo; el flag controla
-la navegación del navegador.
-Actualmente el servidor envía todos los chunks de cada vista, aunque el
-navegador pueda reutilizar un bitmap para evitar volver a decodificarlo.
-
-La secuencia de respuesta utiliza números big-endian:
-
-```text
-VIEW_START = PAI/1, generación, viewport, zoom, región y cantidad
-CHUNK      = PAI/1, generación, índice, geometría, longitud y JPEG
-VIEW_END   = PAI/1, generación, cantidad y bytes JPEG totales
-```
-
-## Compilar y ejecutar
-
-```bash
-make compile
-make run
-```
-
-Verificar herramientas:
+Se necesitan Java 21, GNU Make y libvips (`vips` y `vipsthumbnail`). Desde la raíz del proyecto:
 
 ```bash
 make check-tools
+make run
 ```
 
-Para una imagen no JPEG gigante que necesite preparación, ejecutar una vez:
+Abrir <http://localhost:8080/>. Los originales se colocan en `images/originals`. Algunas imágenes gigantes requieren preparación previa para acceder rápidamente a sus regiones:
 
 ```bash
-make prepare-image IMAGE=017-110-000-24650032
+make prepare-image IMAGE=ID_DE_LA_IMAGEN
 ```
 
-Si solo se necesita el zoom general de un original enorme, se puede generar
-únicamente la vista previa con `make prepare-overview IMAGE=ID`. El zoom
-detallado seguirá requiriendo `make prepare-image IMAGE=ID`.
+Para generar únicamente la vista general: `make prepare-overview IMAGE=ID_DE_LA_IMAGEN`. La preparación conserva el original y crea derivados en `images/processed`; `make run` no la ejecuta automáticamente.
 
-El proceso puede tardar y ocupar varios GiB. Crea una vista general JPEG y un
-BigTIFF mosaico de resolución completa en `images/processed`; conserva el
-original y no genera una pirámide. `make run` no realiza esta conversión.
+## Configuración y documento técnico
 
-## Directorios
+Las opciones del servidor están en `config/server.properties` y las del navegador en `web/config.js`. Reiniciar Java o recargar la página, respectivamente, después de cambiarlas.
 
-```text
-src/cache/    caché GreedyDual-Size de JPEG
-src/image/    lectura y procesamiento regional
-src/view/     zoom, regiones, chunks, generaciones y coordinación
-src/worker/   pool limitado de workers
-src/protocol/ codec binario PAI/1 VIEW
-src/server/   servidor HTTP/WebSocket y lectura de frames
-web/          cliente PAI/1, caché de bitmaps y visor adaptable
-```
-
-Para seguir el código: `src/Main.java` descubre las imágenes e inicia
-`AsyncHttpServer`; `/pai` entrega cada `VIEW` a `ViewCoordinator`, que llama
-a `ViewProcessor`. En el navegador, `web/app.js` coordina la conexión y el
-canvas; `web/protocol.js` lee y escribe PAI/1; `web/navigation.js` calcula zoom
-y centro; `web/minimap.js` controla la miniatura; `web/bitmap-cache.js` guarda
-los bitmaps reutilizables. `web/index.html` contiene únicamente la estructura
-de la página y carga `app.js` como módulo.
-
-Los originales se colocan en `images/originals`. `images/processed` no se usa
-para construir una pirámide persistente. Los derivados tienen el ID, tamaño y
-fecha del original en su nombre; una nueva versión no reutiliza archivos viejos.
-
-La bitácora detallada del rediseño está en:
-
-```text
-../BITACORA_COMPLETA_SERVIDOR_ASINCRONO_CHUNKS.md
-```
-
-La explicación paso a paso de la arquitectura, WebSocket, TCP y los formatos
-binarios PAI se encuentra en [docs/README.md](docs/README.md).
-
-## Próximo hito
-
-Revisar el enunciado y preparar una demostración reproducible del flujo
-completo. El recorrido de zoom y memoria con Firefox y la prueba de clientes
-simultáneos están registrados en la bitácora, secciones 56 y 57. El navegador
-todavía reconstruye cada vista completa en el canvas y el servidor reenvía los
-JPEG aunque el cliente conserve un bitmap reutilizable.
+La especificación completa de PAI/1 —formato de mensajes, algoritmos, cachés, concurrencia, decisiones de diseño y evidencia— se entrega en **`docs/PAI.pdf`**
